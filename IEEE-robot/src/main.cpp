@@ -62,14 +62,25 @@ bool capacitor_zone = false;
 // drives into and stays on. If all three sensors read black continuously for
 // long enough, that's it - nothing else on the normal track (corners,
 // intersections, dashed-line gaps) stays solid black for anywhere near this
-// long. A brief dropout (a seam, a scuff, a wheel bump) within the run
-// doesn't reset the clock, since that already once cost us a real detection.
+// long.
+//
+// The dropout tolerance exists only to absorb a single noisy ADC sample
+// (a few ms at most - this loop has no blocking delays), not to bridge real
+// gaps. Keep it small: a large tolerance lets a track feature that flickers
+// in and out of "all three black" (an intersection, a corner the aggressive
+// PD oscillates across) stitch many short bursts together into a run that
+// never resets, reading as sustained black even though it never truly was -
+// this is what caused a run of false end-zone detections.
 constexpr uint32_t END_ZONE_BLACK_CONFIRM_MS = 500;
-constexpr uint32_t END_ZONE_BLACK_DROPOUT_TOLERANCE_MS = 150;
+constexpr uint32_t END_ZONE_BLACK_DROPOUT_TOLERANCE_MS = 30;
 
 bool in_end_zone = false;
 uint32_t black_run_started_ms = 0; // 0 = no run currently in progress
 uint32_t last_all_black_ms = 0;
+
+// Once a ball has been captured, never look for the end zone again for the
+// rest of the run - regardless of what the sensors see afterward.
+bool ball_retrieved = false;
 
 // Once ball retrieval reports done (successful capture or not - that
 // distinction isn't made yet), drive straight out. The robot starts this
@@ -165,6 +176,7 @@ void loop()
     if (command.capture_complete)
     {
       Serial.println("[EndZone] retrieval complete -> driving out to find line");
+      ball_retrieved = true;
       exiting_end_zone = true;
       return;
     }
@@ -193,8 +205,11 @@ int determine_drive_mode()
 
   // This only takes control once the sensors have read solid black for the
   // full confirm duration. Until then, normal driving below receives exactly
-  // the same sensor readings and motor commands as before.
-  if (update_end_zone_detector(left_black && middle_black && right_black))
+  // the same sensor readings and motor commands as before. Once a ball has
+  // been retrieved, this is skipped permanently - the end zone should never
+  // be looked for again for the rest of the run.
+  if (!ball_retrieved &&
+      update_end_zone_detector(left_black && middle_black && right_black))
   {
     return 8;
   }
