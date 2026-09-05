@@ -3,6 +3,7 @@
 // Pivot only when one side sees a very strong line and the other is mostly clear.
 constexpr float PIVOT_BLACK_LEVEL = 0.90f;
 constexpr float PIVOT_OTHER_SIDE_MAX = 0.10f;
+constexpr float TRIPLE_TURN_SCALE = 3.0f;
 
 int last_left_speed = 0;
 int last_right_speed = 0;
@@ -98,11 +99,27 @@ int determine_drive_mode()
   // until the robot leaves this wide black region.
   if (left_black && middle_black && right_black)
   {
-    const int slow_left_speed = static_cast<int>(
-        last_heading_left_speed * TRIPLE_BLACK_SPEED_SCALE);
+    // Separate the previous heading into forward motion and turn amount.
+    const float heading_forward =
+        (last_heading_left_speed + last_heading_right_speed) / 2.0f;
 
-    const int slow_right_speed = static_cast<int>(
-        last_heading_right_speed * TRIPLE_BLACK_SPEED_SCALE);
+    const float heading_turn =
+        (last_heading_left_speed - last_heading_right_speed) / 2.0f;
+
+    // Slow forward travel, but preserve/amplify the steering difference.
+    const int slow_left_speed = constrain(
+        static_cast<int>(
+            (heading_forward * TRIPLE_BLACK_SPEED_SCALE) +
+            (heading_turn * TRIPLE_TURN_SCALE)),
+        -MAX_PWM,
+        MAX_PWM);
+
+    const int slow_right_speed = constrain(
+        static_cast<int>(
+            (heading_forward * TRIPLE_BLACK_SPEED_SCALE) -
+            (heading_turn * TRIPLE_TURN_SCALE)),
+        -MAX_PWM,
+        MAX_PWM);
 
     drive_motors(slow_left_speed, slow_right_speed);
     return 6;
