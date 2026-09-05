@@ -64,7 +64,7 @@ bool capacitor_zone = false;
 // intersections, dashed-line gaps) stays solid black for anywhere near this
 // long. A brief dropout (a seam, a scuff, a wheel bump) within the run
 // doesn't reset the clock, since that already once cost us a real detection.
-constexpr uint32_t END_ZONE_BLACK_CONFIRM_MS = 2000;
+constexpr uint32_t END_ZONE_BLACK_CONFIRM_MS = 500;
 constexpr uint32_t END_ZONE_BLACK_DROPOUT_TOLERANCE_MS = 150;
 
 bool in_end_zone = false;

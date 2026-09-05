@@ -8,12 +8,14 @@ enum class BallRetrieveState : uint8_t
   IDLE,
   SEARCHING,
   CLOSING_IN,
+  SHIMMYING,
   CAPTURING,
   COMPLETE,
 };
 
 BallRetrieveState ball_retrieve_state = BallRetrieveState::IDLE;
 uint32_t close_in_started_ms = 0;
+uint32_t shimmy_started_ms = 0;
 
 // The ultrasonic sensor rejects very close echoes (under about 3 cm), so use
 // a short timed creep to place the ball in the capture mechanism after it
@@ -25,6 +27,15 @@ uint32_t close_in_started_ms = 0;
 // silently not moving at all before the hand lowers.
 constexpr int FINAL_APPROACH_REVERSE_SPEED = 60;
 constexpr uint32_t FINAL_APPROACH_REVERSE_MS = 300;
+
+// After the straight creep, the ball tends to sit off-center from the
+// grabber. Bias the reverse briefly so the robot curves to one side while
+// still backing up, walking the ball into position before the hand lowers.
+// Sign/magnitude and duration are both meant to be tuned on the robot: start
+// small and increase until the ball lands in the gripper consistently. If it
+// shimmies the wrong way, flip the sign of SHIMMY_TURN_BIAS.
+constexpr int SHIMMY_TURN_BIAS = 20;
+constexpr uint32_t SHIMMY_DURATION_MS = 200;
 
 void begin_ball_retrieval()
 {
@@ -70,6 +81,18 @@ BallRetrieveCommand update_ball_retrieval()
     {
       return {-FINAL_APPROACH_REVERSE_SPEED, -FINAL_APPROACH_REVERSE_SPEED,
               true, false};
+    }
+
+    shimmy_started_ms = millis();
+    ball_retrieve_state = BallRetrieveState::SHIMMYING;
+    return {-FINAL_APPROACH_REVERSE_SPEED - SHIMMY_TURN_BIAS,
+            -FINAL_APPROACH_REVERSE_SPEED + SHIMMY_TURN_BIAS, true, false};
+
+  case BallRetrieveState::SHIMMYING:
+    if (millis() - shimmy_started_ms < SHIMMY_DURATION_MS)
+    {
+      return {-FINAL_APPROACH_REVERSE_SPEED - SHIMMY_TURN_BIAS,
+              -FINAL_APPROACH_REVERSE_SPEED + SHIMMY_TURN_BIAS, true, false};
     }
 
     lower_hand();
