@@ -72,10 +72,15 @@ uint32_t black_run_started_ms = 0; // 0 = no run currently in progress
 uint32_t last_all_black_ms = 0;
 
 // Once ball retrieval reports done (successful capture or not - that
-// distinction isn't made yet), drive straight blind until any sensor finds
-// black again. The course has a line ringing the end zone specifically to
-// funnel the robot back onto the track this way.
+// distinction isn't made yet), drive straight out. The robot starts this
+// still standing on the solid black end zone, so it must first see genuine
+// white (i.e. actually leave the black square) before it starts watching for
+// black again - otherwise it re-triggers the end-zone detector immediately
+// off the ground it's already standing on. Only once clear of the black does
+// finding a line again mean the moat ringing the end zone, not the zone
+// itself.
 bool exiting_end_zone = false;
+bool exit_cleared_black_zone = false;
 
 int determine_drive_mode();
 void pid_drive();
@@ -112,9 +117,30 @@ void loop()
 {
   if (exiting_end_zone)
   {
-    const bool left_black = check_black(left_ir);
-    const bool middle_black = check_black(middle_ir);
-    const bool right_black = check_black(right_ir);
+    const int left_value = analogRead(left_ir);
+    const int middle_value = analogRead(middle_ir);
+    const int right_value = analogRead(right_ir);
+
+    if (!exit_cleared_black_zone)
+    {
+      const bool all_very_white =
+          left_value <= WHITE_GAP_MAX_READING &&
+          middle_value <= WHITE_GAP_MAX_READING &&
+          right_value <= WHITE_GAP_MAX_READING;
+
+      if (all_very_white)
+      {
+        Serial.println("[EndZone] cleared black zone -> now looking for line");
+        exit_cleared_black_zone = true;
+      }
+
+      drive_motors(straight_speed, straight_speed);
+      return;
+    }
+
+    const bool left_black = left_value > black_threshold_for(left_ir);
+    const bool middle_black = middle_value > black_threshold_for(middle_ir);
+    const bool right_black = right_value > black_threshold_for(right_ir);
 
     if (left_black || middle_black || right_black)
     {
@@ -122,6 +148,7 @@ void loop()
       // normal line following.
       Serial.println("[EndZone] line found -> resuming line following");
       exiting_end_zone = false;
+      exit_cleared_black_zone = false;
       in_end_zone = false;
       black_run_started_ms = 0;
       return;
