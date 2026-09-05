@@ -4,13 +4,9 @@
 constexpr float PIVOT_BLACK_LEVEL = 0.90f;
 constexpr float PIVOT_OTHER_SIDE_MAX = 0.10f;
 constexpr float TRIPLE_TURN_SCALE = 3.0f;
-constexpr unsigned long CORNER_FOLLOW_THROUGH_MS = 220;
 
 int last_left_speed = 0;
 int last_right_speed = 0;
-int corner_follow_left_speed = 0;
-int corner_follow_right_speed = 0;
-unsigned long corner_follow_until_ms = 0;
 
 constexpr float TRIPLE_BLACK_SPEED_SCALE = 0.40f;
 // Fraction of each calibrated black range required to count as “detected.”
@@ -57,11 +53,8 @@ const int right_motorB = 5;
 const int left_pwm = 21;
 const int right_pwm = 16;
 bool capacitor_zone = false;
-constexpr unsigned long DEBUG_PRINT_INTERVAL_MS = 100;
 
 int determine_drive_mode();
-const char *drive_mode_name(int mode);
-const char *drive_direction_name(int left_speed, int right_speed);
 void pid_drive();
 int calculate_pid_speed(int sensor_pin);
 void drive_motors(int left_vel, int right_vel);
@@ -87,33 +80,13 @@ void setup()
   ledcSetup(RIGHT_PWM_CHANNEL, PWM_FREQUENCY, PWM_RESOLUTION);
   ledcAttachPin(left_pwm, LEFT_PWM_CHANNEL);
   ledcAttachPin(right_pwm, RIGHT_PWM_CHANNEL);
-  Serial.begin(9600);
+  // Serial.begin(9600);
 }
 
 void loop()
 {
-  const int mode = determine_drive_mode();
-
-  static unsigned long last_debug_print_ms = 0;
-  const unsigned long now_ms = millis();
-
-  if (now_ms - last_debug_print_ms >= DEBUG_PRINT_INTERVAL_MS)
-  {
-    last_debug_print_ms = now_ms;
-
-    Serial.printf(
-        "mode=%s(%d) dir=%s raw=[%d,%d,%d] cmd=[%d,%d] heading=[%d,%d]\n",
-        drive_mode_name(mode),
-        mode,
-        drive_direction_name(last_left_speed, last_right_speed),
-        analogRead(left_ir),
-        analogRead(middle_ir),
-        analogRead(right_ir),
-        last_left_speed,
-        last_right_speed,
-        last_heading_left_speed,
-        last_heading_right_speed);
-  }
+  // drive_motors(50, 50);
+  determine_drive_mode();
 }
 
 int determine_drive_mode()
@@ -121,7 +94,6 @@ int determine_drive_mode()
   const bool left_black = check_black(left_ir);
   const bool middle_black = check_black(middle_ir);
   const bool right_black = check_black(right_ir);
-  const unsigned long now_ms = millis();
 
   // Triple black: preserve the previous PD heading, but travel slowly
   // until the robot leaves this wide black region.
@@ -149,21 +121,8 @@ int determine_drive_mode()
         -MAX_PWM,
         MAX_PWM);
 
-    corner_follow_left_speed = slow_left_speed;
-    corner_follow_right_speed = slow_right_speed;
-    corner_follow_until_ms = now_ms + CORNER_FOLLOW_THROUGH_MS;
-
     drive_motors(slow_left_speed, slow_right_speed);
     return 6;
-  }
-
-  // The new line may briefly appear centered before the 90-degree turn is
-  // complete. Keep the triple-black curve for a short time instead of
-  // immediately replacing it with a straight PD command.
-  if (now_ms < corner_follow_until_ms)
-  {
-    drive_motors(corner_follow_left_speed, corner_follow_right_speed);
-    return 7;
   }
 
   // One or two sensors on black: return to normal PD steering.
@@ -191,60 +150,6 @@ int determine_drive_mode()
 
   drive_motors(last_left_speed, last_right_speed);
   return 0;
-}
-
-const char *drive_mode_name(int mode)
-{
-  switch (mode)
-  {
-  case 0:
-    return "gap";
-  case 1:
-    return "pd";
-  case 5:
-    return "capacitor";
-  case 6:
-    return "triple";
-  case 7:
-    return "corner-hold";
-  default:
-    return "unknown";
-  }
-}
-
-const char *drive_direction_name(int left_speed, int right_speed)
-{
-  // This matches the existing motor convention: left faster/right slower
-  // means a right turn; the opposite difference means a left turn.
-  if (left_speed > 20 && right_speed < -20)
-  {
-    return "sharp right";
-  }
-
-  if (left_speed < -20 && right_speed > 20)
-  {
-    return "sharp left";
-  }
-
-  const int turn_difference = left_speed - right_speed;
-  const int magnitude = abs(turn_difference);
-
-  if (magnitude <= 8)
-  {
-    return "straight";
-  }
-
-  if (magnitude >= 70)
-  {
-    return (turn_difference > 0) ? "hard right" : "hard left";
-  }
-
-  if (magnitude >= 25)
-  {
-    return (turn_difference > 0) ? "right" : "left";
-  }
-
-  return (turn_difference > 0) ? "slightly right" : "slightly left";
 }
 
 void pid_drive()
