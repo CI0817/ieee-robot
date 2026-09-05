@@ -8,16 +8,16 @@ constexpr int RIGHT_BLACK_THRESHOLD = 70;
 constexpr int LEFT_BLACK_MAX = 2400;
 constexpr int MIDDLE_BLACK_MAX = 1780;
 constexpr int RIGHT_BLACK_MAX = 1630;
-constexpr int MAX_PWM = 80;
-constexpr int MAX_DRIVE_PWM = 80; // Increase gradually after tuning
+constexpr int MAX_PWM = 160;
+constexpr int MAX_DRIVE_PWM = 160; // Increase gradually after tuning
 constexpr int DEADBAND = 0;
 constexpr uint32_t PWM_FREQUENCY = 20000;
 constexpr uint8_t PWM_RESOLUTION = 8;
 constexpr uint8_t LEFT_PWM_CHANNEL = 0;
 constexpr uint8_t RIGHT_PWM_CHANNEL = 1;
 
-const int turning_speed = 50;
-const int straight_speed = 50;
+const int turning_speed = 100;
+const int straight_speed = 100;
 
 const int left_ir = 32;
 const int middle_ir = 35;
@@ -158,7 +158,7 @@ void pid_drive()
 
   const int left_sensor_range = LEFT_BLACK_MAX - LEFT_BLACK_THRESHOLD;
   const int right_sensor_range = RIGHT_BLACK_MAX - RIGHT_BLACK_THRESHOLD;
-  const int max_correction = 50;
+  const int max_correction = 80;
 
   const int left_error = constrain(
       left_value - LEFT_BLACK_THRESHOLD, 0, left_sensor_range);
@@ -177,10 +177,10 @@ void pid_drive()
       (right_black - left_black) * max_correction);
 
   const int left_speed = constrain(
-      straight_speed + correction, 0, MAX_PWM);
+      straight_speed + correction, -MAX_PWM, MAX_PWM);
 
   const int right_speed = constrain(
-      straight_speed - correction, 0, MAX_PWM);
+      straight_speed - correction, -MAX_PWM, MAX_PWM);
 
   drive_motors(left_speed, right_speed);
   // Serial.print("\nLeft speed: ");
