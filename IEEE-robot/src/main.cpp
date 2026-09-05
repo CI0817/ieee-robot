@@ -2,7 +2,7 @@
 
 // Pivot only when one side sees a very strong line and the other is mostly clear.
 constexpr float PIVOT_BLACK_LEVEL = 0.90f;
-constexpr float PIVOT_OTHER_SIDE_MAX = 0.30f;
+constexpr float PIVOT_OTHER_SIDE_MAX = 0.10f;
 
 int last_left_speed = 0;
 int last_right_speed = 0;
@@ -19,8 +19,8 @@ constexpr int RIGHT_BLACK_THRESHOLD = 45;
 constexpr int LEFT_BLACK_MAX = 760;
 constexpr int MIDDLE_BLACK_MAX = 165;
 constexpr int RIGHT_BLACK_MAX = 270;
-constexpr int MAX_PWM = 160;
-constexpr int MAX_DRIVE_PWM = 160; // Increase gradually after tuning
+constexpr int MAX_PWM = 250;
+// constexpr int MAX_DRIVE_PWM = 160; // Increase gradually after tuning
 constexpr int DEADBAND = 0;
 constexpr uint32_t PWM_FREQUENCY = 20000;
 constexpr uint8_t PWM_RESOLUTION = 8;
