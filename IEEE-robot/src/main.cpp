@@ -1,34 +1,40 @@
 #include <Arduino.h>
 
-// Pivot only when one side sees a very strong line and the other is mostly clear.
-constexpr float PIVOT_BLACK_LEVEL = 0.90f;
-constexpr float PIVOT_OTHER_SIDE_MAX = 0.30f;
-
-int last_left_speed = 0;
-int last_right_speed = 0;
-
-// Per-sensor calibration values measured on this robot.
-// constexpr int LEFT_BLACK_THRESHOLD = 75;
-// constexpr int MIDDLE_BLACK_THRESHOLD = 45;
-// constexpr int RIGHT_BLACK_THRESHOLD = 70;
-
+// Per-sensor calibration: black readings must be higher than white readings.
 constexpr int LEFT_BLACK_THRESHOLD = 45;
 constexpr int MIDDLE_BLACK_THRESHOLD = 40;
 constexpr int RIGHT_BLACK_THRESHOLD = 45;
-
 constexpr int LEFT_BLACK_MAX = 760;
 constexpr int MIDDLE_BLACK_MAX = 165;
 constexpr int RIGHT_BLACK_MAX = 270;
 constexpr int MAX_PWM = 160;
-constexpr int MAX_DRIVE_PWM = 160; // Increase gradually after tuning
-constexpr int DEADBAND = 0;
 constexpr uint32_t PWM_FREQUENCY = 20000;
 constexpr uint8_t PWM_RESOLUTION = 8;
 constexpr uint8_t LEFT_PWM_CHANNEL = 0;
 constexpr uint8_t RIGHT_PWM_CHANNEL = 1;
 
-const int turning_speed = 100;
-const int straight_speed = 100;
+// Starting values: tune on the robot at low speed before increasing cruise PWM.
+constexpr int straight_speed = 100;
+constexpr int turning_speed = 90;
+constexpr uint32_t CONTROL_PERIOD_MS = 10;
+constexpr uint32_t MIN_TURN_MS = 60;
+constexpr uint32_t TURN_TIMEOUT_MS = 1200;
+constexpr uint32_t GAP_CROSS_MS = 180;
+constexpr int GAP_SPEED = 65;
+constexpr uint32_t SEARCH_LEG_MS = 250;
+constexpr uint32_t SEARCH_TIMEOUT_MS = 6 * SEARCH_LEG_MS;
+constexpr int BLACK_HYSTERESIS = 5;
+constexpr int CONFIRM_SAMPLES = 3;
+constexpr int LOST_CONFIRM_SAMPLES = 3;
+constexpr float CORNER_MIN_LEVEL = 0.12f;
+constexpr float STEERING_DEADBAND = 0.03f;
+constexpr int MIN_FOLLOW_PWM = 40;
+// PD gains use normalized side error; KD has units PWM * seconds / error.
+constexpr float STEERING_KP = 55.0f;
+constexpr float STEERING_KD = 0.8f;
+constexpr float DERIVATIVE_FILTER_SECONDS = 0.02f;
+constexpr float MAX_DAMPING_PWM = 20.0f;
+constexpr float MAX_STEERING_PWM = 55.0f;
 
 const int left_ir = 32;
 const int middle_ir = 35;
@@ -39,16 +45,95 @@ const int right_motorA = 17;
 const int right_motorB = 5;
 const int left_pwm = 21;
 const int right_pwm = 16;
-bool capacitor_zone = false;
 
-int determine_drive_mode();
-void pid_drive();
-int calculate_pid_speed(int sensor_pin);
+int last_left_speed = 0;
+int last_right_speed = 0;
 void drive_motors(int left_vel, int right_vel);
-bool check_black(int sensor_pin);
-int black_threshold_for(int sensor_pin);
-void end_zone();
-void stop();
+
+struct Sensor
+{
+  int pin;
+  int threshold;
+  int maximum;
+  bool black = false;
+  float strength = 0.0f;
+
+  Sensor(int sensor_pin, int black_threshold, int black_maximum)
+      : pin(sensor_pin), threshold(black_threshold), maximum(black_maximum) {}
+
+  void sample()
+  {
+    const int raw = analogRead(pin);
+    // Separate entry/exit thresholds prevent noise toggling line presence.
+    black = raw > (black ? threshold - BLACK_HYSTERESIS : threshold);
+    strength = constrain(
+        (raw - threshold) / static_cast<float>(maximum - threshold), 0.0f, 1.0f);
+  }
+};
+
+Sensor left_sensor{left_ir, LEFT_BLACK_THRESHOLD, LEFT_BLACK_MAX};
+Sensor middle_sensor{middle_ir, MIDDLE_BLACK_THRESHOLD, MIDDLE_BLACK_MAX};
+Sensor right_sensor{right_ir, RIGHT_BLACK_THRESHOLD, RIGHT_BLACK_MAX};
+
+enum class DriveState
+{
+  Follow,
+  Gap,
+  Search,
+  Turn,
+  Stopped
+};
+DriveState drive_state = DriveState::Follow;
+uint32_t last_control_ms = 0;
+uint32_t turn_started_ms = 0;
+uint32_t gap_started_ms = 0;
+int visible_samples = 0;
+int lost_samples = 0;
+int last_direction = 0; // -1 = left, +1 = right
+int turn_direction = 0;
+int corner_direction = 0;
+int corner_samples = 0;
+int centered_samples = 0;
+float steering = 0.0f;
+float previous_error = 0.0f;
+float filtered_derivative = 0.0f;
+bool steering_ready = false;
+
+void reset_steering()
+{
+  steering = 0.0f;
+  previous_error = 0.0f;
+  filtered_derivative = 0.0f;
+  steering_ready = false;
+}
+
+float calculate_steering(float difference, bool centered, float dt)
+{
+  // No old correction should keep turning the robot after it reaches center.
+  if (centered)
+  {
+    reset_steering();
+    return 0.0f;
+  }
+  // Continuous deadband: no jump in output at the edge of the neutral region.
+  const float error = difference > STEERING_DEADBAND ? difference - STEERING_DEADBAND
+      : difference < -STEERING_DEADBAND ? difference + STEERING_DEADBAND : 0.0f;
+  if (steering_ready && dt > 0.0f && dt <= 0.05f)
+  {
+    const float derivative = (error - previous_error) / dt;
+    const float alpha = dt / (DERIVATIVE_FILTER_SECONDS + dt);
+    filtered_derivative += alpha * (derivative - filtered_derivative);
+  }
+  else
+    filtered_derivative = 0.0f;
+  previous_error = error;
+  steering_ready = true;
+  const float damping = constrain(STEERING_KD * filtered_derivative,
+                                  -MAX_DAMPING_PWM, MAX_DAMPING_PWM);
+  // Filter only the derivative. Delaying the whole correction continued to
+  // steer in the old direction after the robot had crossed the line.
+  return constrain(STEERING_KP * error + damping, -MAX_STEERING_PWM, MAX_STEERING_PWM);
+}
 
 void setup()
 {
@@ -61,141 +146,148 @@ void setup()
   pinMode(right_motorB, OUTPUT);
   pinMode(left_pwm, OUTPUT);
   pinMode(right_pwm, OUTPUT);
-
-  // Explicitly attach the motor-enable pins to ESP32 LEDC PWM outputs.
   ledcSetup(LEFT_PWM_CHANNEL, PWM_FREQUENCY, PWM_RESOLUTION);
   ledcSetup(RIGHT_PWM_CHANNEL, PWM_FREQUENCY, PWM_RESOLUTION);
   ledcAttachPin(left_pwm, LEFT_PWM_CHANNEL);
   ledcAttachPin(right_pwm, RIGHT_PWM_CHANNEL);
-  // Serial.begin(9600);
+  drive_motors(0, 0);
+}
+
+void begin_turn(int direction, uint32_t now)
+{
+  drive_state = DriveState::Turn;
+  turn_direction = direction;
+  turn_started_ms = now;
+  centered_samples = 0;
+  corner_samples = 0;
+  lost_samples = 0;
+  reset_steering();
 }
 
 void loop()
 {
-  // drive_motors(50, 50);
-  determine_drive_mode();
-}
+  const uint32_t now = millis();
+  if (now - last_control_ms < CONTROL_PERIOD_MS)
+    return;
+  const float dt = (now - last_control_ms) / 1000.0f;
+  last_control_ms = now;
 
-int determine_drive_mode()
-{
-  const bool left_black = check_black(left_ir);
-  const bool middle_black = check_black(middle_ir);
-  const bool right_black = check_black(right_ir);
+  // One shared sensor snapshot per control tick, including the middle sensor.
+  left_sensor.sample();
+  middle_sensor.sample();
+  right_sensor.sample();
+  const bool left = left_sensor.black;
+  const bool middle = middle_sensor.black;
+  const bool right = right_sensor.black;
 
-  // Any visible line: PID decides between smooth steering and pivot override.
-  if (left_black || middle_black || right_black)
+  // Keep sensing after a timeout; replacing the robot on tape resumes it.
+  if (drive_state == DriveState::Stopped)
   {
-    pid_drive();
-    return 1;
-  }
-
-  // No visible line: explicitly keep the most recent motor command.
-  if (capacitor_zone)
-  {
-    drive_motors(straight_speed, straight_speed);
-
-    while (!check_black(left_ir) &&
-           !check_black(middle_ir) &&
-           !check_black(right_ir))
+    visible_samples = left || middle || right ? visible_samples + 1 : 0;
+    if (visible_samples < CONFIRM_SAMPLES)
     {
-      delay(10);
+      drive_motors(0, 0);
+      return;
     }
-
-    stop();
-    return 5;
+    drive_state = DriveState::Follow;
+    visible_samples = 0;
+    corner_samples = 0;
+    corner_direction = 0;
+    last_direction = 0;
+    lost_samples = 0;
+    reset_steering();
   }
 
-  // drive_motors(last_left_speed, last_right_speed);
-  return 0;
-}
-
-void pid_drive()
-{
-  capacitor_zone = false;
-
-  const int left_value = analogRead(left_ir);
-  const int right_value = analogRead(right_ir);
-
-  const int left_sensor_range =
-      LEFT_BLACK_MAX - LEFT_BLACK_THRESHOLD;
-
-  const int right_sensor_range =
-      RIGHT_BLACK_MAX - RIGHT_BLACK_THRESHOLD;
-
-  const float left_black = constrain(
-      (left_value - LEFT_BLACK_THRESHOLD) /
-          static_cast<float>(left_sensor_range),
-      0.0f,
-      1.0f);
-
-  const float right_black = constrain(
-      (right_value - RIGHT_BLACK_THRESHOLD) /
-          static_cast<float>(right_sensor_range),
-      0.0f,
-      1.0f);
-
-  // Very strong black on only one side: pivot on the spot.
-  if (left_black >= PIVOT_BLACK_LEVEL &&
-      right_black <= PIVOT_OTHER_SIDE_MAX)
+  if (drive_state == DriveState::Gap)
   {
-    drive_motors(-turning_speed/2, turning_speed/2);
-    return;
+    if (left || middle || right)
+      drive_state = DriveState::Follow;
+    else if (now - gap_started_ms >= GAP_CROSS_MS)
+    {
+      begin_turn(1, now); // No side evidence: sweep right, left, then right.
+      drive_state = DriveState::Search;
+    }
+    else
+    {
+      drive_motors(GAP_SPEED, GAP_SPEED);
+      return;
+    }
   }
 
-  if (right_black >= PIVOT_BLACK_LEVEL &&
-      left_black <= PIVOT_OTHER_SIDE_MAX)
+  if (drive_state == DriveState::Follow)
   {
-    drive_motors(turning_speed/2, -turning_speed/2);
-    return;
+    if (middle)
+      last_direction = 0;
+
+    // Require meaningful side strength, not just a reading above white noise.
+    const bool strong_side = left ? left_sensor.strength >= CORNER_MIN_LEVEL
+                                  : right_sensor.strength >= CORNER_MIN_LEVEL;
+    const int candidate = !middle && (left != right) && strong_side ? (left ? -1 : 1) : 0;
+    corner_samples = candidate != 0 ? (candidate == corner_direction ? corner_samples + 1 : 1) : 0;
+    corner_direction = candidate;
+    if (corner_samples >= 2)
+      last_direction = candidate;
+    lost_samples = left || middle || right ? 0 : lost_samples + 1;
+    if (corner_samples >= CONFIRM_SAMPLES)
+      begin_turn(candidate, now);
+    else if (lost_samples > 0)
+    {
+      // A brief dropout must not change steering or trigger a recovery pivot.
+      if (lost_samples < LOST_CONFIRM_SAMPLES)
+      {
+        steering_ready = false;
+        return;
+      }
+      // A known side recovers immediately; centered loss may be a short gap.
+      if (last_direction != 0)
+        begin_turn(last_direction, now);
+      else
+      {
+        drive_state = DriveState::Gap;
+        gap_started_ms = now;
+        reset_steering();
+        drive_motors(GAP_SPEED, GAP_SPEED);
+        return;
+      }
+    }
   }
 
-  // Normal proportional/PID-style steering.
-  constexpr int MAX_CORRECTION = 100;
+  if (drive_state == DriveState::Turn || drive_state == DriveState::Search)
+  {
+    const uint32_t elapsed = now - turn_started_ms;
+    const bool searching = drive_state == DriveState::Search;
+    if (elapsed >= (searching ? SEARCH_TIMEOUT_MS : TURN_TIMEOUT_MS))
+    {
+      drive_state = DriveState::Stopped;
+      visible_samples = 0;
+      drive_motors(0, 0);
+      return;
+    }
+    // Do not release a turn on a single noisy sample or the incoming line.
+    // Adjacent sensors may still overlap tape: center visibility is sufficient.
+    const bool centered = middle;
+    centered_samples = centered && now - turn_started_ms >= MIN_TURN_MS ? centered_samples + 1 : 0;
+    if (centered_samples < CONFIRM_SAMPLES)
+    {
+      // Increasing sweep lengths cross the starting heading in both directions.
+      const int direction = searching
+                                ? (elapsed < SEARCH_LEG_MS || elapsed >= 3 * SEARCH_LEG_MS ? 1 : -1)
+                                : turn_direction;
+      drive_motors(direction * turning_speed, -direction * turning_speed);
+      return;
+    }
+    drive_state = DriveState::Follow;
+    last_direction = 0;
+    corner_direction = 0;
+    reset_steering();
+  }
 
-  const int correction = static_cast<int>(
-      (right_black - left_black) * MAX_CORRECTION);
-
-  const int left_speed = constrain(
-      straight_speed + correction,
-      -MAX_PWM,
-      MAX_PWM);
-
-  const int right_speed = constrain(
-      straight_speed - correction,
-      -MAX_PWM,
-      MAX_PWM);
-
-  drive_motors(left_speed, right_speed);
+  steering = calculate_steering(right_sensor.strength - left_sensor.strength,
+                                middle && !left && !right, dt);
+  // Keep ordinary following wheels powered; pivots belong to the turn state.
+  drive_motors(constrain(static_cast<int>(straight_speed + steering), MIN_FOLLOW_PWM, MAX_PWM),
+               constrain(static_cast<int>(straight_speed - steering), MIN_FOLLOW_PWM, MAX_PWM));
 }
-
-// int calculate_pid_speed(int sensor_pin)
-// {
-//   const int sensor_value = analogRead(sensor_pin);
-
-//   // Always use valid, consistent PWM limits.
-//   const int cruise_speed = constrain(straight_speed, 0, MAX_PWM);
-//   const int max_speed = constrain(MAX_DRIVE_PWM, cruise_speed, MAX_PWM);
-
-//   const int error = sensor_value - BLACK_THRESHOLD;
-
-//   // White or near-black threshold: drive at the fixed cruise speed.
-//   if (error <= DEADBAND)
-//   {
-//     return cruise_speed;
-//   }
-
-//   const int limited_error = constrain(
-//       error,
-//       0,
-//       BLACK_MAX_VALUE - BLACK_THRESHOLD);
-
-//   return map(
-//       limited_error,
-//       0,
-//       BLACK_MAX_VALUE - BLACK_THRESHOLD,
-//       cruise_speed,
-//       max_speed);
-// }
 
 void set_motor(int pwm_pin, int direction_pin_1, int direction_pin_2, int velocity)
 {
@@ -232,37 +324,4 @@ void drive_motors(int left_vel, int right_vel)
 
   set_motor(left_pwm, left_motorA, left_motorB, left_vel);
   set_motor(right_pwm, right_motorA, right_motorB, right_vel);
-}
-
-bool check_black(int sensor_pin)
-{
-  int sensor_value = analogRead(sensor_pin);
-  return sensor_value > black_threshold_for(sensor_pin);
-}
-
-int black_threshold_for(int sensor_pin)
-{
-  if (sensor_pin == left_ir)
-  {
-    return LEFT_BLACK_THRESHOLD;
-  }
-
-  if (sensor_pin == middle_ir)
-  {
-    return MIDDLE_BLACK_THRESHOLD;
-  }
-
-  return RIGHT_BLACK_THRESHOLD;
-}
-
-void end_zone()
-{
-  capacitor_zone = false; // Reset capacitor zone flag
-  stop();                 // Stop the motors
-  // Additional logic for end zone can be added here
-}
-
-void stop()
-{
-  drive_motors(0, 0); // Stop the motors
 }
