@@ -4,14 +4,12 @@
 constexpr float PIVOT_BLACK_LEVEL = 0.90f;
 constexpr float PIVOT_OTHER_SIDE_MAX = 0.10f;
 constexpr float TRIPLE_TURN_SCALE = 3.0f;
-// Corner samples can enter the three-sensor region before every sensor reaches
-// a very high value. Use a moderate calibrated level, then require a recent
-// non-straight heading to reject triple-black obstacles.
-constexpr float TRIPLE_BLACK_LEVEL = 0.30f;
-constexpr int MIN_TRIPLE_HEADING_DIFFERENCE = 20;
 
 int last_left_speed = 0;
 int last_right_speed = 0;
+int previous_black_sensor_count = 0;
+bool triple_black_active = false;
+bool triple_black_is_corner = false;
 
 constexpr float TRIPLE_BLACK_SPEED_SCALE = 0.35f;
 constexpr int MIN_TRIPLE_MOVING_PWM = 40;
@@ -118,30 +116,22 @@ int determine_drive_mode()
       middle_value <= WHITE_GAP_MAX_READING &&
       right_value <= WHITE_GAP_MAX_READING;
 
-  const float left_strength = constrain(
-      (left_value - LEFT_BLACK_THRESHOLD) /
-          static_cast<float>(LEFT_BLACK_MAX - LEFT_BLACK_THRESHOLD),
-      0.0f,
-      1.0f);
+  const int black_sensor_count =
+      static_cast<int>(left_black) +
+      static_cast<int>(middle_black) +
+      static_cast<int>(right_black);
 
-  const float middle_strength = constrain(
-      (middle_value - MIDDLE_BLACK_THRESHOLD) /
-          static_cast<float>(MIDDLE_BLACK_MAX - MIDDLE_BLACK_THRESHOLD),
-      0.0f,
-      1.0f);
+  if (black_sensor_count == 3 && previous_black_sensor_count != 3)
+  {
+    triple_black_active = true;
+    triple_black_is_corner = (previous_black_sensor_count == 2);
+  }
+  else if (black_sensor_count != 3)
+  {
+    triple_black_active = false;
+  }
 
-  const float right_strength = constrain(
-      (right_value - RIGHT_BLACK_THRESHOLD) /
-          static_cast<float>(RIGHT_BLACK_MAX - RIGHT_BLACK_THRESHOLD),
-      0.0f,
-      1.0f);
-
-  const bool strong_triple_black =
-      left_strength >= TRIPLE_BLACK_LEVEL &&
-      middle_strength >= TRIPLE_BLACK_LEVEL &&
-      right_strength >= TRIPLE_BLACK_LEVEL &&
-      abs(last_heading_left_speed - last_heading_right_speed) >=
-          MIN_TRIPLE_HEADING_DIFFERENCE;
+  previous_black_sensor_count = black_sensor_count;
 
   if (!all_very_white)
   {
@@ -150,8 +140,16 @@ int determine_drive_mode()
 
   // Triple black: preserve the previous PD heading, but travel slowly
   // until the robot leaves this wide black region.
-  if (strong_triple_black)
+  if (triple_black_active)
   {
+    // Entering triple black from zero or one black sensor is treated as an
+    // obstacle: continue straight rather than initiating a corner turn.
+    if (!triple_black_is_corner)
+    {
+      drive_motors(straight_speed, straight_speed);
+      return 7;
+    }
+
     // Separate the previous heading into forward motion and turn amount.
     const float heading_forward =
         (last_heading_left_speed + last_heading_right_speed) / 2.0f;
