@@ -5,6 +5,7 @@ constexpr int BLACK_MAX_VALUE = 2000; // Measure your darkest reading; start wit
 constexpr int MAX_PWM = 80;
 constexpr int MAX_DRIVE_PWM = 80; // Increase gradually after tuning
 constexpr int DEADBAND = 0;
+const int max_correction = 100;
 
 const int turning_speed = 50;
 const int straight_speed = 50;
@@ -20,6 +21,13 @@ const int left_pwm = 21;
 const int right_pwm = 16;
 bool capacitor_zone = false;
 
+// ultrasonics
+// TRIG = 13
+// ECHO = 12
+
+// Servo
+// SIGNAL = 14
+
 int determine_drive_mode();
 void pid_drive();
 int calculate_pid_speed(int sensor_pin);
@@ -27,6 +35,8 @@ void drive_motors(int left_vel, int right_vel);
 bool check_black(int sensor_pin);
 void end_zone();
 void stop();
+void grab_ballz();
+int read_USS();
 
 void setup()
 {
@@ -39,7 +49,7 @@ void setup()
   pinMode(right_motorB, OUTPUT);
   pinMode(left_pwm, OUTPUT);
   pinMode(right_pwm, OUTPUT);
-  Serial.begin(9600);
+  // Serial.begin(9600);
 }
 
 void loop()
@@ -117,90 +127,13 @@ int determine_drive_mode()
     {
       // Spin to search for the line
       // drive_motors(turning_speed, -turning_speed); // Spin in place
-      Serial.print("\nSearching for line");
+      // Serial.print("\nSearching for line");
       pid_drive();
       // TODO: add some kind of counter to track when lost. line
       return 0; // Search mode
     }
   }
 }
-
-void pid_drive()
-{
-  // Serial.print("\nPID Mode");
-  capacitor_zone = false;
-
-  const int left_value = analogRead(left_ir);
-  const int right_value = analogRead(right_ir);
-
-  // // Strong black: turn in place toward the detected side.
-  // if (left_value >= BLACK_MAX_VALUE)
-  // {
-  //   drive_motors(-turning_speed, turning_speed);
-  //   return;
-  // }
-
-  // if (right_value >= BLACK_MAX_VALUE)
-  // {
-  //   drive_motors(turning_speed, -turning_speed);
-  //   return;
-  // }
-
-  const int sensor_range = BLACK_MAX_VALUE - BLACK_THRESHOLD;
-  const int max_correction = 50;
-
-  const int left_error = constrain(
-      left_value - BLACK_THRESHOLD, 0, sensor_range);
-
-  const int right_error = constrain(
-      right_value - BLACK_THRESHOLD, 0, sensor_range);
-
-  // Left black -> negative correction -> left slows, right speeds up.
-  // Right black -> positive correction -> left speeds up, right slows.
-  const int correction =
-      ((right_error - left_error) * max_correction) / sensor_range;
-
-  const int left_speed = constrain(
-      straight_speed + correction, 0, MAX_PWM);
-
-  const int right_speed = constrain(
-      straight_speed - correction, 0, MAX_PWM);
-
-  drive_motors(left_speed, right_speed);
-  Serial.print("\nLeft speed: ");
-  Serial.print(left_speed);
-  Serial.print(" | Right speed: ");
-  Serial.println(right_speed);
-}
-
-// int calculate_pid_speed(int sensor_pin)
-// {
-//   const int sensor_value = analogRead(sensor_pin);
-
-//   // Always use valid, consistent PWM limits.
-//   const int cruise_speed = constrain(straight_speed, 0, MAX_PWM);
-//   const int max_speed = constrain(MAX_DRIVE_PWM, cruise_speed, MAX_PWM);
-
-//   const int error = sensor_value - BLACK_THRESHOLD;
-
-//   // White or near-black threshold: drive at the fixed cruise speed.
-//   if (error <= DEADBAND)
-//   {
-//     return cruise_speed;
-//   }
-
-//   const int limited_error = constrain(
-//       error,
-//       0,
-//       BLACK_MAX_VALUE - BLACK_THRESHOLD);
-
-//   return map(
-//       limited_error,
-//       0,
-//       BLACK_MAX_VALUE - BLACK_THRESHOLD,
-//       cruise_speed,
-//       max_speed);
-// }
 
 void set_motor(int pwm_pin, int direction_pin_1, int direction_pin_2, int velocity)
 {
@@ -244,10 +177,194 @@ void end_zone()
 {
   capacitor_zone = false; // Reset capacitor zone flag
   stop();                 // Stop the motors
+  drive_motors(turning_speed, -turning_speed);
+  delay(1000);
+  while (read_USS() > 50)
+  {
+    drive_motors(turning_speed, -turning_speed);
+  }
+  while (read_USS() > 5)
+  {
+    drive_motors(-straight_speed, -straight_speed);
+  }
+  grab_ballz();
+
   // Additional logic for end zone can be added here
 }
 
 void stop()
 {
   drive_motors(0, 0); // Stop the motors
+}
+
+void grab_ballz()
+{
+}
+
+int read_USS()
+{
+  return 0;
+}
+
+void pid_drive()
+{
+  capacitor_zone = false;
+
+  static float integral = 0.0f;
+  static float previous_error = 0.0f;
+  static float filtered_derivative = 0.0f;
+  static float last_correction = 0.0f;
+
+  static unsigned long previous_time_us = 0;
+  static unsigned long lost_line_start_ms = 0;
+
+  constexpr int BASE_SPEED = 40;
+  constexpr int TURN_THRESHOLD = 1000;
+
+  constexpr unsigned long DASH_GAP_HOLD_MS = 900;
+  constexpr unsigned long RECOVERY_TURN_MS = 600;
+
+  constexpr float KP = 20.0f;
+  constexpr float KI = 0.5f;
+  constexpr float KD = 2.0f;
+  constexpr float INTEGRAL_LIMIT = 0.50f;
+  constexpr float MAX_CORRECTION = 35.0f;
+
+  const unsigned long now_us = micros();
+
+  float dt = (previous_time_us == 0)
+                 ? 0.01f
+                 : (now_us - previous_time_us) / 1000000.0f;
+
+  previous_time_us = now_us;
+  dt = constrain(dt, 0.002f, 0.05f);
+
+  const int left_value = analogRead(left_ir);
+  const int middle_value = analogRead(middle_ir);
+  const int right_value = analogRead(right_ir);
+
+  const bool all_white =
+      left_value < BLACK_THRESHOLD &&
+      middle_value < BLACK_THRESHOLD &&
+      right_value < BLACK_THRESHOLD;
+
+  // Bridge dashed-line gaps using the same curve as before the gap.
+  if (all_white)
+  {
+    if (lost_line_start_ms == 0)
+    {
+      lost_line_start_ms = millis();
+    }
+
+    const unsigned long lost_time_ms = millis() - lost_line_start_ms;
+
+    float continued_correction = last_correction;
+
+    const float correction_magnitude =
+        (last_correction >= 0.0f)
+            ? last_correction
+            : -last_correction;
+
+    // If the robot has not found the line after the expected dash gap,
+    // gradually tighten the previous curve to search for it.
+    if (lost_time_ms > DASH_GAP_HOLD_MS &&
+        correction_magnitude > 1.0f)
+    {
+      const float recovery_amount = constrain(
+          (lost_time_ms - DASH_GAP_HOLD_MS) /
+              static_cast<float>(RECOVERY_TURN_MS),
+          0.0f,
+          1.0f);
+
+      const float direction =
+          (last_correction >= 0.0f) ? 1.0f : -1.0f;
+
+      continued_correction = direction * (correction_magnitude +
+                                          ((MAX_CORRECTION - correction_magnitude) *
+                                           recovery_amount));
+    }
+
+    const int left_speed = constrain(
+        static_cast<int>(BASE_SPEED - continued_correction),
+        0,
+        MAX_PWM);
+
+    const int right_speed = constrain(
+        static_cast<int>(BASE_SPEED + continued_correction),
+        0,
+        MAX_PWM);
+
+    drive_motors(left_speed, right_speed);
+    return;
+  }
+
+  lost_line_start_ms = 0;
+
+  // Sharp left: left strongly black and right white.
+  if (left_value >= TURN_THRESHOLD &&
+      right_value < BLACK_THRESHOLD)
+  {
+    integral = 0.0f;
+    previous_error = 0.0f;
+    filtered_derivative = 0.0f;
+    last_correction = -MAX_CORRECTION;
+
+    drive_motors(-turning_speed * 3 / 2, turning_speed / 2);
+    return;
+  }
+
+  // Sharp right: right strongly black and left white.
+  if (right_value >= TURN_THRESHOLD &&
+      left_value < BLACK_THRESHOLD)
+  {
+    integral = 0.0f;
+    previous_error = 0.0f;
+    filtered_derivative = 0.0f;
+    last_correction = MAX_CORRECTION;
+
+    drive_motors(turning_speed / 2, -turning_speed * 3 / 2);
+    return;
+  }
+
+  const int sensor_range = BLACK_MAX_VALUE - BLACK_THRESHOLD;
+
+  const int left_black = constrain(
+      left_value - BLACK_THRESHOLD, 0, sensor_range);
+
+  const int right_black = constrain(
+      right_value - BLACK_THRESHOLD, 0, sensor_range);
+
+  const float error =
+      (right_black - left_black) / static_cast<float>(sensor_range);
+
+  integral += error * dt;
+  integral = constrain(integral, -INTEGRAL_LIMIT, INTEGRAL_LIMIT);
+
+  const float raw_derivative = constrain(
+      (error - previous_error) / dt,
+      -3.0f,
+      3.0f);
+
+  filtered_derivative =
+      (0.7f * filtered_derivative) + (0.3f * raw_derivative);
+
+  const float correction = constrain(
+      (KP * error) + (KI * integral) + (KD * filtered_derivative),
+      -MAX_CORRECTION,
+      MAX_CORRECTION);
+
+  previous_error = error;
+  last_correction = correction;
+
+  const int left_speed = constrain(
+      static_cast<int>(BASE_SPEED - correction),
+      0,
+      MAX_PWM);
+
+  const int right_speed = constrain(
+      static_cast<int>(BASE_SPEED + correction),
+      0,
+      MAX_PWM);
+
+  drive_motors(left_speed, right_speed);
 }
