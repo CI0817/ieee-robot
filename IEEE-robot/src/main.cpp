@@ -2,6 +2,11 @@
 
 constexpr float TRIPLE_BLACK_LEVEL = 0.70f;
 
+constexpr float TURN_INTENT_ERROR = 0.12f;
+constexpr unsigned long TURN_INTENT_WINDOW_MS = 250;
+
+unsigned long last_turn_intent_ms = 0;
+
 bool triple_black_latched = false;
 
 bool is_strong_triple_black();
@@ -105,6 +110,10 @@ int determine_drive_mode()
   const bool strong_triple_black = is_strong_triple_black();
   const unsigned long now_ms = millis();
 
+  const bool recent_turn_intent =
+    last_turn_intent_ms != 0 &&
+    (now_ms - last_turn_intent_ms) <= TURN_INTENT_WINDOW_MS;
+
   // Rearm the next corner only after this strong triple-black patch clears.
   if (!strong_triple_black)
   {
@@ -143,20 +152,28 @@ int determine_drive_mode()
   // Start one committed pivot only for genuinely strong triple black.
   if (strong_triple_black && !triple_black_latched)
   {
-    triple_black_latched = true;
-    corner_turn_active = true;
-    corner_turn_start_ms = now_ms;
-
-    if (last_turn_direction > 0)
+    // Triple black after a recent left/right error: likely a 90-degree turn.
+    if (recent_turn_intent)
     {
-      drive_motors(CORNER_PIVOT_SPEED, -CORNER_PIVOT_SPEED);
-    }
-    else
-    {
-      drive_motors(-CORNER_PIVOT_SPEED, CORNER_PIVOT_SPEED);
+      triple_black_latched = true;
+      corner_turn_active = true;
+      corner_turn_start_ms = now_ms;
+
+      if (last_turn_direction > 0)
+      {
+        drive_motors(CORNER_PIVOT_SPEED, -CORNER_PIVOT_SPEED);
+      }
+      else
+      {
+        drive_motors(-CORNER_PIVOT_SPEED, CORNER_PIVOT_SPEED);
+      }
+
+      return 6;
     }
 
-    return 6;
+    // Triple black while previously travelling straight: treat it as an obstacle.
+    drive_motors(last_left_speed, last_right_speed);
+    return 7;
   }
 
   // Normal line following.
@@ -236,13 +253,15 @@ void pid_drive()
     error = (right_black - left_black) / total_black;
   }
 
-  if (error > DIRECTION_SAVE_ERROR)
+  if (error > TURN_INTENT_ERROR)
   {
     last_turn_direction = 1; // right
+    last_turn_intent_ms = millis();
   }
-  else if (error < -DIRECTION_SAVE_ERROR)
+  else if (error < -TURN_INTENT_ERROR)
   {
     last_turn_direction = -1; // left
+    last_turn_intent_ms = millis();
   }
 
   // Ignore tiny sensor-noise corrections near the center.
