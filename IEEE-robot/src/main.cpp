@@ -24,6 +24,8 @@ constexpr float KP = 65.0f;
 constexpr float KD = 7.0f;
 constexpr float MAX_CORRECTION = 60.0f;
 constexpr float CENTER_DEADBAND = 0.03f;
+constexpr float MIDDLE_CENTER_LEVEL = 0.20f;
+constexpr float OUTER_CENTER_MAX = 0.08f;
 
 // Per-sensor calibration values measured on this robot.
 // constexpr int LEFT_BLACK_THRESHOLD = 75;
@@ -235,9 +237,16 @@ void pid_drive()
   // is present, but should not dilute a strong left/right corner correction.
   const float outer_black = left_black + right_black;
 
+  // The line is confidently centered only when the middle sees it strongly
+  // and the outer sensors see, at most, a small overlap of the line.
+  const bool centered_on_middle =
+      middle_black >= MIDDLE_CENTER_LEVEL &&
+      left_black <= OUTER_CENTER_MAX &&
+      right_black <= OUTER_CENTER_MAX;
+
   float error = 0.0f;
 
-  if (outer_black > 0.01f)
+  if (!centered_on_middle && outer_black > 0.01f)
   {
     // -1 = strongly left, 0 = balanced, +1 = strongly right.
     error = (right_black - left_black) / outer_black;
