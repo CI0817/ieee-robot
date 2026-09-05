@@ -71,6 +71,12 @@ bool in_end_zone = false;
 uint32_t black_run_started_ms = 0; // 0 = no run currently in progress
 uint32_t last_all_black_ms = 0;
 
+// Once ball retrieval reports done (successful capture or not - that
+// distinction isn't made yet), drive straight blind until any sensor finds
+// black again. The course has a line ringing the end zone specifically to
+// funnel the robot back onto the track this way.
+bool exiting_end_zone = false;
+
 int determine_drive_mode();
 void pid_drive();
 int calculate_pid_speed(int sensor_pin);
@@ -104,9 +110,38 @@ void setup()
 
 void loop()
 {
+  if (exiting_end_zone)
+  {
+    const bool left_black = check_black(left_ir);
+    const bool middle_black = check_black(middle_ir);
+    const bool right_black = check_black(right_ir);
+
+    if (left_black || middle_black || right_black)
+    {
+      // Found the moat line ringing the end zone - hand control back to
+      // normal line following.
+      Serial.println("[EndZone] line found -> resuming line following");
+      exiting_end_zone = false;
+      in_end_zone = false;
+      black_run_started_ms = 0;
+      return;
+    }
+
+    drive_motors(straight_speed, straight_speed);
+    return;
+  }
+
   if (in_end_zone)
   {
     const BallRetrieveCommand command = update_ball_retrieval();
+
+    if (command.capture_complete)
+    {
+      Serial.println("[EndZone] retrieval complete -> driving out to find line");
+      exiting_end_zone = true;
+      return;
+    }
+
     drive_motors(command.left_speed, command.right_speed);
     return;
   }

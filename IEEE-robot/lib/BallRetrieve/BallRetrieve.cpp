@@ -34,7 +34,7 @@ constexpr uint32_t FINAL_APPROACH_REVERSE_MS = 300;
 // Sign/magnitude and duration are both meant to be tuned on the robot: start
 // small and increase until the ball lands in the gripper consistently. If it
 // shimmies the wrong way, flip the sign of SHIMMY_TURN_BIAS.
-constexpr int SHIMMY_TURN_BIAS = 20;
+constexpr int SHIMMY_TURN_BIAS = 30;
 constexpr uint32_t SHIMMY_DURATION_MS = 200;
 
 void begin_ball_retrieval()
