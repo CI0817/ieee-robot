@@ -9,11 +9,15 @@ int last_left_speed = 0;
 int last_right_speed = 0;
 
 constexpr float TRIPLE_BLACK_SPEED_SCALE = 0.20f;
+constexpr float WHITE_GAP_SPEED_SCALE = 0.40f;
 // Fraction of each calibrated black range required to count as “detected.”
 constexpr float DETECT_BLACK_LEVEL = 0.15f;
 
 int last_heading_left_speed = 100;
 int last_heading_right_speed = 100;
+int white_gap_left_speed = 0;
+int white_gap_right_speed = 0;
+bool white_gap_active = false;
 
 constexpr float KP = 65.0f;
 constexpr float KD = 7.0f;
@@ -95,6 +99,11 @@ int determine_drive_mode()
   const bool middle_black = check_black(middle_ir);
   const bool right_black = check_black(right_ir);
 
+  if (left_black || middle_black || right_black)
+  {
+    white_gap_active = false;
+  }
+
   // Triple black: preserve the previous PD heading, but travel slowly
   // until the robot leaves this wide black region.
   if (left_black && middle_black && right_black)
@@ -132,23 +141,18 @@ int determine_drive_mode()
     return 1;
   }
 
-  // All white: continue the previous command through a line gap.
-  if (capacitor_zone)
+  // Capture the last heading once on entry to an all-white gap. Replaying the
+  // same scaled pair preserves the curve without reducing it every loop.
+  if (!white_gap_active)
   {
-    drive_motors(straight_speed, straight_speed);
-
-    while (!check_black(left_ir) &&
-           !check_black(middle_ir) &&
-           !check_black(right_ir))
-    {
-      delay(10);
-    }
-
-    stop();
-    return 5;
+    white_gap_left_speed = last_left_speed;
+    white_gap_right_speed = last_right_speed;
+    white_gap_active = true;
   }
 
-  drive_motors(last_left_speed, last_right_speed);
+  drive_motors(
+      static_cast<int>(white_gap_left_speed * WHITE_GAP_SPEED_SCALE),
+      static_cast<int>(white_gap_right_speed * WHITE_GAP_SPEED_SCALE));
   return 0;
 }
 
