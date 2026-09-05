@@ -11,7 +11,16 @@ int last_right_speed = 0;
 constexpr float WHITE_GAP_SPEED_SCALE = 0.40f;
 constexpr int WHITE_GAP_MAX_READING = 35;
 // Fraction of each calibrated black range required to count as “detected.”
+// Deliberately lenient - this only needs to catch a thin printed line,
+// including its fainter edges, for ordinary line following.
 constexpr float DETECT_BLACK_LEVEL = 0.15f;
+// Fraction required to count as "genuinely black" for end-zone detection
+// specifically - a filled zone reads solidly dark on all three sensors,
+// unlike a thin line's edges or a corner/intersection only partially
+// covering a sensor's footprint. Tune this against a real reading taken
+// sitting on the end zone vs. the darkest ordinary line feature on the
+// track.
+constexpr float DEEP_BLACK_LEVEL = 0.60f;
 
 int white_gap_left_speed = 0;
 int white_gap_right_speed = 0;
@@ -98,10 +107,11 @@ void pid_drive();
 int calculate_pid_speed(int sensor_pin);
 void drive_motors(int left_vel, int right_vel);
 bool check_black(int sensor_pin);
+int black_threshold_for_level(int sensor_pin, float level);
 int black_threshold_for(int sensor_pin);
 void end_zone();
 void stop();
-bool update_end_zone_detector(bool all_black);
+bool update_end_zone_detector(bool all_deep_black);
 
 void setup()
 {
@@ -203,13 +213,16 @@ int determine_drive_mode()
       middle_value <= WHITE_GAP_MAX_READING &&
       right_value <= WHITE_GAP_MAX_READING;
 
-  // This only takes control once the sensors have read solid black for the
+  // This only takes control once the sensors have read genuinely, deeply
+  // black (not merely past the lenient line-following threshold) for the
   // full confirm duration. Until then, normal driving below receives exactly
   // the same sensor readings and motor commands as before. Once a ball has
   // been retrieved, this is skipped permanently - the end zone should never
   // be looked for again for the rest of the run.
   if (!ball_retrieved &&
-      update_end_zone_detector(left_black && middle_black && right_black))
+      update_end_zone_detector(left_value > black_threshold_for_level(left_ir, DEEP_BLACK_LEVEL) &&
+                                middle_value > black_threshold_for_level(middle_ir, DEEP_BLACK_LEVEL) &&
+                                right_value > black_threshold_for_level(right_ir, DEEP_BLACK_LEVEL)))
   {
     return 8;
   }
@@ -430,24 +443,27 @@ bool check_black(int sensor_pin)
   return sensor_value > black_threshold_for(sensor_pin);
 }
 
-int black_threshold_for(int sensor_pin)
+int black_threshold_for_level(int sensor_pin, float level)
 {
   if (sensor_pin == left_ir)
   {
     return LEFT_BLACK_THRESHOLD + static_cast<int>(
-        (LEFT_BLACK_MAX - LEFT_BLACK_THRESHOLD) * DETECT_BLACK_LEVEL);
+        (LEFT_BLACK_MAX - LEFT_BLACK_THRESHOLD) * level);
   }
 
   if (sensor_pin == middle_ir)
   {
     return MIDDLE_BLACK_THRESHOLD + static_cast<int>(
-        (MIDDLE_BLACK_MAX - MIDDLE_BLACK_THRESHOLD) *
-        DETECT_BLACK_LEVEL);
+        (MIDDLE_BLACK_MAX - MIDDLE_BLACK_THRESHOLD) * level);
   }
 
   return RIGHT_BLACK_THRESHOLD + static_cast<int>(
-      (RIGHT_BLACK_MAX - RIGHT_BLACK_THRESHOLD) *
-      DETECT_BLACK_LEVEL);
+      (RIGHT_BLACK_MAX - RIGHT_BLACK_THRESHOLD) * level);
+}
+
+int black_threshold_for(int sensor_pin)
+{
+  return black_threshold_for_level(sensor_pin, DETECT_BLACK_LEVEL);
 }
 
 void end_zone()
