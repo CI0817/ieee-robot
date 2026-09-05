@@ -1,8 +1,8 @@
 #include <Arduino.h>
 
 // Pivot only when one side sees a very strong line and the other is mostly clear.
-constexpr float PIVOT_BLACK_LEVEL = 0.55f;
-constexpr float PIVOT_OTHER_SIDE_MAX = 0.10f;
+constexpr float PIVOT_BLACK_LEVEL = 0.90f;
+constexpr float PIVOT_OTHER_SIDE_MAX = 0.30f;
 
 int last_left_speed = 0;
 int last_right_speed = 0;
@@ -12,13 +12,13 @@ int last_right_speed = 0;
 // constexpr int MIDDLE_BLACK_THRESHOLD = 45;
 // constexpr int RIGHT_BLACK_THRESHOLD = 70;
 
-constexpr int LEFT_BLACK_THRESHOLD = 40;
+constexpr int LEFT_BLACK_THRESHOLD = 45;
 constexpr int MIDDLE_BLACK_THRESHOLD = 40;
-constexpr int RIGHT_BLACK_THRESHOLD = 40;
+constexpr int RIGHT_BLACK_THRESHOLD = 45;
 
-constexpr int LEFT_BLACK_MAX = 2490;
-constexpr int MIDDLE_BLACK_MAX = 1810;
-constexpr int RIGHT_BLACK_MAX = 1620;
+constexpr int LEFT_BLACK_MAX = 760;
+constexpr int MIDDLE_BLACK_MAX = 165;
+constexpr int RIGHT_BLACK_MAX = 270;
 constexpr int MAX_PWM = 160;
 constexpr int MAX_DRIVE_PWM = 160; // Increase gradually after tuning
 constexpr int DEADBAND = 0;
@@ -105,7 +105,7 @@ int determine_drive_mode()
     return 5;
   }
 
-  drive_motors(last_left_speed, last_right_speed);
+  // drive_motors(last_left_speed, last_right_speed);
   return 0;
 }
 
@@ -138,19 +138,19 @@ void pid_drive()
   if (left_black >= PIVOT_BLACK_LEVEL &&
       right_black <= PIVOT_OTHER_SIDE_MAX)
   {
-    drive_motors(-turning_speed, 0);
+    drive_motors(-turning_speed/2, turning_speed/2);
     return;
   }
 
   if (right_black >= PIVOT_BLACK_LEVEL &&
       left_black <= PIVOT_OTHER_SIDE_MAX)
   {
-    drive_motors(0, -turning_speed);
+    drive_motors(turning_speed/2, -turning_speed/2);
     return;
   }
 
   // Normal proportional/PID-style steering.
-  constexpr int MAX_CORRECTION = 80;
+  constexpr int MAX_CORRECTION = 100;
 
   const int correction = static_cast<int>(
       (right_black - left_black) * MAX_CORRECTION);
