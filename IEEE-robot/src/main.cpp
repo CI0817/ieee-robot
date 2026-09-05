@@ -10,6 +10,7 @@ int last_right_speed = 0;
 
 constexpr float TRIPLE_BLACK_SPEED_SCALE = 0.20f;
 constexpr float WHITE_GAP_SPEED_SCALE = 0.40f;
+constexpr int WHITE_GAP_MAX_READING = 35;
 // Fraction of each calibrated black range required to count as “detected.”
 constexpr float DETECT_BLACK_LEVEL = 0.15f;
 
@@ -95,11 +96,20 @@ void loop()
 
 int determine_drive_mode()
 {
-  const bool left_black = check_black(left_ir);
-  const bool middle_black = check_black(middle_ir);
-  const bool right_black = check_black(right_ir);
+  const int left_value = analogRead(left_ir);
+  const int middle_value = analogRead(middle_ir);
+  const int right_value = analogRead(right_ir);
 
-  if (left_black || middle_black || right_black)
+  const bool left_black = left_value > black_threshold_for(left_ir);
+  const bool middle_black = middle_value > black_threshold_for(middle_ir);
+  const bool right_black = right_value > black_threshold_for(right_ir);
+
+  const bool all_very_white =
+      left_value <= WHITE_GAP_MAX_READING &&
+      middle_value <= WHITE_GAP_MAX_READING &&
+      right_value <= WHITE_GAP_MAX_READING;
+
+  if (!all_very_white)
   {
     white_gap_active = false;
   }
@@ -141,7 +151,18 @@ int determine_drive_mode()
     return 1;
   }
 
-  // Capture the last heading once on entry to an all-white gap. Replaying the
+  // A faint reading is not a full white gap, so resume normal steering rather
+  // than preserving the old slow command.
+  if (!all_very_white)
+  {
+    pid_drive();
+    return 2;
+  }
+
+  // same scaled pair preserves the curve without reducing it every loop.
+  // it is present, but should not dilute a strong left/right corner correction.
+  // Capture the last heading once on entry to a genuinely white gap. Replaying
+  // the same scaled pair preserves the curve without reducing it every loop.
   // same scaled pair preserves the curve without reducing it every loop.
   if (!white_gap_active)
   {
