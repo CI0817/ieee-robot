@@ -1,370 +1,242 @@
 #include <Arduino.h>
+#include <Preferences.h>
 
-constexpr int BLACK_THRESHOLD = 100;  // Ignore readings at or below this
-constexpr int BLACK_MAX_VALUE = 2000; // Measure your darkest reading; start with 1000
+// Positive wheel velocity must mean forward on BOTH sides. Verify with wheels lifted.
+constexpr int IR_PINS[] = {32, 35, 34}; // left, centre, right
+constexpr int LEFT_A = 19, LEFT_B = 18, RIGHT_A = 17, RIGHT_B = 5;
+constexpr int LEFT_PWM = 21, RIGHT_PWM = 16;
 constexpr int MAX_PWM = 80;
-constexpr int MAX_DRIVE_PWM = 80; // Increase gradually after tuning
-constexpr int DEADBAND = 0;
-const int max_correction = 100;
+constexpr int LEFT_TRIM = 0, RIGHT_TRIM = 0; // measured forward PWM offsets
+constexpr bool BLACK_IS_HIGH = true; // check raw readings; change if your module is inverted
 
-const int turning_speed = 50;
-const int straight_speed = 50;
+// Starting values, to tune on the actual robot. PWM is not a speed measurement.
+constexpr float BASE_PWM = 40, SLOW_PWM = 30, PIVOT_PWM = 40;
+constexpr float KP = 24, KD = 0.12f; // derivative uses seconds; integral intentionally disabled
+constexpr float MAX_CORRECTION = 35, DERIVATIVE_TAU = 0.025f;
+constexpr uint32_t CONTROL_US = 5000;
+constexpr uint32_t GAP_HOLD_MS = 160, SEARCH_TIMEOUT_MS = 1400;
+constexpr uint32_t CORNER_CONFIRM_MS = 45, CORNER_TIMEOUT_MS = 1200;
+constexpr uint32_t REACQUIRE_MS = 30, CALIBRATION_MS = 6000;
+constexpr int MIN_CALIBRATION_SPAN = 300;
+constexpr float BLACK_ON = 0.55f, BLACK_OFF = 0.35f;
+constexpr float MIN_SIGNAL = 0.30f;
 
-const int left_ir = 32;
-const int middle_ir = 35;
-const int right_ir = 34;
-const int left_motorA = 19;
-const int left_motorB = 18;
-const int right_motorA = 17;
-const int right_motorB = 5;
-const int left_pwm = 21;
-const int right_pwm = 16;
-bool capacitor_zone = false;
+// At ambiguous junctions choose a branch explicitly. This is not a maze solver.
+enum class Branch { Left, Right };
+constexpr Branch BRANCH_PREFERENCE = Branch::Left;
+enum class Mode { Stopped, Calibrating, Tracking, Gap, Searching, Corner };
+Mode mode = Mode::Stopped;
+Preferences preferences;
+int white[3], black[3], calMin[3], calMax[3];
+bool calibrated = false, logging = false;
+struct Sample { int raw[3]; float b[3]; bool dark[3]; bool visible; float error; };
+Sample sample = {};
+uint32_t previousTick = 0, stateSince = 0, lostSince = 0, lastLog = 0;
+uint32_t candidateSince = 0, centredSince = 0;
+bool candidateActive = false, centredActive = false;
+int candidateSide = 0, turnSide = 0, lastLineSide = 0;
+float previousError = 0, derivative = 0, recentSteering = 0, gapSteering = 0;
+float trackingBase = BASE_PWM, gapBase = BASE_PWM;
+bool derivativeReady = false;
+int commandedLeft = 0, commandedRight = 0;
 
-// ultrasonics
-// TRIG = 13
-// ECHO = 12
-
-// Servo
-// SIGNAL = 14
-
-int determine_drive_mode();
-void pid_drive();
-int calculate_pid_speed(int sensor_pin);
-void drive_motors(int left_vel, int right_vel);
-bool check_black(int sensor_pin);
-void end_zone();
-void stop();
-void grab_ballz();
-int read_USS();
-
-void setup()
-{
-  pinMode(left_ir, INPUT);
-  pinMode(middle_ir, INPUT);
-  pinMode(right_ir, INPUT);
-  pinMode(left_motorA, OUTPUT);
-  pinMode(right_motorA, OUTPUT);
-  pinMode(left_motorB, OUTPUT);
-  pinMode(right_motorB, OUTPUT);
-  pinMode(left_pwm, OUTPUT);
-  pinMode(right_pwm, OUTPUT);
-  // Serial.begin(9600);
-}
-
-void loop()
-{
-  determine_drive_mode();
-}
-
-int determine_drive_mode()
-{
-  if (check_black(middle_ir))
-  {
-
-    if (check_black(left_ir) && check_black(right_ir))
-    {
-      // If all sensors detect black, check if we are in the end zone
-      drive_motors(straight_speed, straight_speed);
-      delay(50); // Drive straight a little
-      if (check_black(left_ir) && check_black(middle_ir) && check_black(right_ir))
-      {
-        end_zone();
-        return 10; // End zone
-      }
-      else
-      {
-        // If not in the end zone, we are in the capacitor zone, drive straight
-        capacitor_zone = true;
-        return 11; // Found capacitor zone
-      }
-    }
-    else
-    {
-      // If the middle IR sensor detects black, drive in PID mode
-      pid_drive();
-      return 1; // PID drive mode
-    }
-  }
-
-  else if (check_black(left_ir) && check_black(right_ir))
-  {
-    // If both left and right IR sensors detect black, drive straight
-    drive_motors(straight_speed, straight_speed); // Drive straight
-    return 2;                                     // Straight drive mode
-  }
-
-  else if (check_black(left_ir))
-  {
-    // If only the left IR sensor detects black, turn left
-    pid_drive();
-    // drive_motors(-turning_speed, turning_speed); // Turn left
-    return 3; // Left turn mode
-  }
-
-  else if (check_black(right_ir))
-  {
-    // If only the right IR sensor detects black, turn right
-    pid_drive();
-    // drive_motors(turning_speed, -turning_speed); // Turn right
-    return 4; // Right turn mode
-  }
-
-  else
-  { // No sensors detect black
-    if (capacitor_zone)
-    {
-      // If we are in the capacitor zone, drive straight
-      drive_motors(straight_speed, straight_speed); // Drive straight
-      while (!check_black(left_ir) || !check_black(middle_ir || !check_black(right_ir)))
-      {
-        delay(10);
-      }
-      stop();
-      return 5; // Straight drive mode in capacitor zone
-    }
-    else
-    {
-      // Spin to search for the line
-      // drive_motors(turning_speed, -turning_speed); // Spin in place
-      // Serial.print("\nSearching for line");
-      pid_drive();
-      // TODO: add some kind of counter to track when lost. line
-      return 0; // Search mode
-    }
-  }
-}
-
-void set_motor(int pwm_pin, int direction_pin_1, int direction_pin_2, int velocity)
+float clampf(float x, float lo, float hi) { return x < lo ? lo : (x > hi ? hi : x); }
+void setMotor(int pwmPin, int a, int b, int velocity)
 {
   velocity = constrain(velocity, -MAX_PWM, MAX_PWM);
-
-  const int pwm = abs(velocity);
-
-  if (velocity > 0)
+  digitalWrite(a, velocity > 0 ? HIGH : LOW);
+  digitalWrite(b, velocity < 0 ? HIGH : LOW);
+  analogWrite(pwmPin, abs(velocity));
+}
+void drive(int left, int right)
+{
+  // Trim only moving forward wheels; never turn a stop into motion.
+  commandedLeft = constrain(left > 0 ? left + LEFT_TRIM : left, -MAX_PWM, MAX_PWM);
+  commandedRight = constrain(right > 0 ? right + RIGHT_TRIM : right, -MAX_PWM, MAX_PWM);
+  setMotor(LEFT_PWM, LEFT_A, LEFT_B, commandedLeft);
+  setMotor(RIGHT_PWM, RIGHT_A, RIGHT_B, commandedRight);
+}
+void resetPD() { derivativeReady = false; derivative = 0; }
+void enter(Mode next, uint32_t now)
+{
+  mode = next; stateSince = now; centredActive = false; candidateActive = false;
+  resetPD();
+}
+void halt(uint32_t now)
+{
+  enter(Mode::Stopped, now); drive(0, 0);
+}
+bool validCalibration()
+{
+  for (int i = 0; i < 3; ++i)
+    if (white[i] < 0 || white[i] > 4095 || black[i] < 0 || black[i] > 4095 ||
+        abs(black[i] - white[i]) < MIN_CALIBRATION_SPAN) return false;
+  return true;
+}
+void startCalibration(uint32_t now)
+{
+  halt(now);
+  for (int i = 0; i < 3; ++i) { calMin[i] = 4095; calMax[i] = 0; }
+  enter(Mode::Calibrating, now);
+  Serial.println("Calibration: sweep EVERY sensor over floor and tape for 6 seconds. Motors stopped.");
+}
+void arm(uint32_t now)
+{
+  if (!calibrated) { Serial.println("Calibrate first: send c."); return; }
+  recentSteering = 0; lastLineSide = 0;
+  trackingBase = BASE_PWM;
+  for (int i = 0; i < 3; ++i) sample.dark[i] = false;
+  enter(Mode::Tracking, now);
+  Serial.println("Running. Send s to stop.");
+}
+void readSensors()
+{
+  float total = 0, peak = 0;
+  for (int i = 0; i < 3; ++i)
   {
-    digitalWrite(direction_pin_1, HIGH);
-    digitalWrite(direction_pin_2, LOW);
+    sample.raw[i] = analogRead(IR_PINS[i]);
+    if (!calibrated) continue;
+    sample.b[i] = clampf((sample.raw[i] - white[i]) / float(black[i] - white[i]), 0, 1);
+    sample.dark[i] = sample.b[i] >= (sample.dark[i] ? BLACK_OFF : BLACK_ON);
+    total += sample.b[i]; peak = max(peak, sample.b[i]);
   }
-  else if (velocity < 0)
+  sample.visible = calibrated && peak >= MIN_SIGNAL;
+  sample.error = sample.visible ? (sample.b[2] - sample.b[0]) / total : 0;
+}
+bool centreAcquired(uint32_t now)
+{
+  // Require a single centred line, not an all-black patch or split.
+  bool centred = sample.dark[1] && !sample.dark[0] && !sample.dark[2];
+  if (!centred) { centredActive = false; return false; }
+  if (!centredActive) { centredActive = true; centredSince = now; }
+  return now - centredSince >= REACQUIRE_MS;
+}
+void pivot(int side) { drive(int(side * PIVOT_PWM), int(-side * PIVOT_PWM)); }
+void track(float dt, bool ambiguous)
+{
+  float error = sample.error;
+  // Multi-line patterns cannot be interpreted using their centroid.
+  if (ambiguous) error = BRANCH_PREFERENCE == Branch::Left ? -0.7f : 0.7f;
+  if (!ambiguous && fabsf(error) > 0.15f) lastLineSide = error > 0 ? 1 : -1;
+  float rawD = derivativeReady ? (error - previousError) / dt : 0;
+  derivative += dt / (DERIVATIVE_TAU + dt) * (rawD - derivative);
+  previousError = error; derivativeReady = true;
+  float correction = clampf(KP * error + KD * derivative, -MAX_CORRECTION, MAX_CORRECTION);
+  // History is slower than the instantaneous D term used for stabilization.
+  recentSteering += dt / (0.080f + dt) * (correction - recentSteering);
+  float base = ambiguous ? SLOW_PWM : BASE_PWM - (BASE_PWM - SLOW_PWM) * fabsf(error);
+  trackingBase = base;
+  drive(int(clampf(base + correction, 0, MAX_PWM)), int(clampf(base - correction, 0, MAX_PWM)));
+}
+void control(uint32_t now, float dt)
+{
+  if (mode == Mode::Stopped) { drive(0, 0); return; }
+  if (mode == Mode::Calibrating)
   {
-    digitalWrite(direction_pin_1, LOW);
-    digitalWrite(direction_pin_2, HIGH);
-  }
-  else
-  {
-    // Coast; use HIGH/HIGH instead if your driver supports braking.
-    digitalWrite(direction_pin_1, LOW);
-    digitalWrite(direction_pin_2, LOW);
-  }
-
-  analogWrite(pwm_pin, pwm);
-}
-
-void drive_motors(int left_vel, int right_vel)
-{
-  set_motor(left_pwm, left_motorA, left_motorB, left_vel);
-  set_motor(right_pwm, right_motorA, right_motorB, right_vel);
-}
-
-bool check_black(int sensor_pin)
-{
-  int sensor_value = analogRead(sensor_pin);
-  return sensor_value > BLACK_THRESHOLD; // Returns true if the sensor detects black
-}
-
-void end_zone()
-{
-  capacitor_zone = false; // Reset capacitor zone flag
-  stop();                 // Stop the motors
-  drive_motors(turning_speed, -turning_speed);
-  delay(1000);
-  while (read_USS() > 50)
-  {
-    drive_motors(turning_speed, -turning_speed);
-  }
-  while (read_USS() > 5)
-  {
-    drive_motors(-straight_speed, -straight_speed);
-  }
-  grab_ballz();
-
-  // Additional logic for end zone can be added here
-}
-
-void stop()
-{
-  drive_motors(0, 0); // Stop the motors
-}
-
-void grab_ballz()
-{
-}
-
-int read_USS()
-{
-  return 0;
-}
-
-void pid_drive()
-{
-  capacitor_zone = false;
-
-  static float integral = 0.0f;
-  static float previous_error = 0.0f;
-  static float filtered_derivative = 0.0f;
-  static float last_correction = 0.0f;
-
-  static unsigned long previous_time_us = 0;
-  static unsigned long lost_line_start_ms = 0;
-
-  constexpr int BASE_SPEED = 40;
-  constexpr int TURN_THRESHOLD = 1000;
-
-  constexpr unsigned long DASH_GAP_HOLD_MS = 900;
-  constexpr unsigned long RECOVERY_TURN_MS = 600;
-
-  constexpr float KP = 20.0f;
-  constexpr float KI = 0.5f;
-  constexpr float KD = 2.0f;
-  constexpr float INTEGRAL_LIMIT = 0.50f;
-  constexpr float MAX_CORRECTION = 35.0f;
-
-  const unsigned long now_us = micros();
-
-  float dt = (previous_time_us == 0)
-                 ? 0.01f
-                 : (now_us - previous_time_us) / 1000000.0f;
-
-  previous_time_us = now_us;
-  dt = constrain(dt, 0.002f, 0.05f);
-
-  const int left_value = analogRead(left_ir);
-  const int middle_value = analogRead(middle_ir);
-  const int right_value = analogRead(right_ir);
-
-  const bool all_white =
-      left_value < BLACK_THRESHOLD &&
-      middle_value < BLACK_THRESHOLD &&
-      right_value < BLACK_THRESHOLD;
-
-  // Bridge dashed-line gaps using the same curve as before the gap.
-  if (all_white)
-  {
-    if (lost_line_start_ms == 0)
-    {
-      lost_line_start_ms = millis();
+    for (int i = 0; i < 3; ++i) {
+      calMin[i] = min(calMin[i], sample.raw[i]); calMax[i] = max(calMax[i], sample.raw[i]);
     }
-
-    const unsigned long lost_time_ms = millis() - lost_line_start_ms;
-
-    float continued_correction = last_correction;
-
-    const float correction_magnitude =
-        (last_correction >= 0.0f)
-            ? last_correction
-            : -last_correction;
-
-    // If the robot has not found the line after the expected dash gap,
-    // gradually tighten the previous curve to search for it.
-    if (lost_time_ms > DASH_GAP_HOLD_MS &&
-        correction_magnitude > 1.0f)
-    {
-      const float recovery_amount = constrain(
-          (lost_time_ms - DASH_GAP_HOLD_MS) /
-              static_cast<float>(RECOVERY_TURN_MS),
-          0.0f,
-          1.0f);
-
-      const float direction =
-          (last_correction >= 0.0f) ? 1.0f : -1.0f;
-
-      continued_correction = direction * (correction_magnitude +
-                                          ((MAX_CORRECTION - correction_magnitude) *
-                                           recovery_amount));
+    if (now - stateSince < CALIBRATION_MS) return;
+    for (int i = 0; i < 3; ++i) {
+      white[i] = BLACK_IS_HIGH ? calMin[i] : calMax[i];
+      black[i] = BLACK_IS_HIGH ? calMax[i] : calMin[i];
     }
-
-    const int left_speed = constrain(
-        static_cast<int>(BASE_SPEED - continued_correction),
-        0,
-        MAX_PWM);
-
-    const int right_speed = constrain(
-        static_cast<int>(BASE_SPEED + continued_correction),
-        0,
-        MAX_PWM);
-
-    drive_motors(left_speed, right_speed);
-    return;
+    calibrated = validCalibration();
+    if (calibrated) {
+      size_t savedWhite = preferences.putBytes("white", white, sizeof(white));
+      size_t savedBlack = preferences.putBytes("black", black, sizeof(black));
+      Serial.println(savedWhite == sizeof(white) && savedBlack == sizeof(black)
+                         ? "Calibration saved. Place robot on line; send g to start."
+                         : "Calibration valid in RAM but saving failed. Send g to start; recalibrate after reboot.");
+    } else Serial.println("Calibration failed: each sensor needs both floor and tape. Send c to retry.");
+    halt(now); return;
   }
-
-  lost_line_start_ms = 0;
-
-  // Sharp left: left strongly black and right white.
-  if (left_value >= TURN_THRESHOLD &&
-      right_value < BLACK_THRESHOLD)
+  if (mode == Mode::Corner)
   {
-    integral = 0.0f;
-    previous_error = 0.0f;
-    filtered_derivative = 0.0f;
-    last_correction = -MAX_CORRECTION;
-
-    drive_motors(-turning_speed * 3 / 2, turning_speed / 2);
-    return;
+    if (centreAcquired(now)) { enter(Mode::Tracking, now); recentSteering = 0; }
+    else if (now - stateSince >= CORNER_TIMEOUT_MS) { halt(now); Serial.println("Corner timeout; stopped."); return; }
+    else { pivot(turnSide); return; }
   }
-
-  // Sharp right: right strongly black and left white.
-  if (right_value >= TURN_THRESHOLD &&
-      left_value < BLACK_THRESHOLD)
+  if (mode == Mode::Gap || mode == Mode::Searching)
   {
-    integral = 0.0f;
-    previous_error = 0.0f;
-    filtered_derivative = 0.0f;
-    last_correction = MAX_CORRECTION;
-
-    drive_motors(turning_speed / 2, -turning_speed * 3 / 2);
+    if (sample.visible && (mode == Mode::Gap || centreAcquired(now))) {
+      enter(Mode::Tracking, now);
+    } else {
+      if (now - lostSince >= GAP_HOLD_MS + SEARCH_TIMEOUT_MS) {
+        halt(now); Serial.println("Line lost; stopped. Reposition and send g."); return;
+      }
+      if (mode == Mode::Gap && now - lostSince >= GAP_HOLD_MS) enter(Mode::Searching, now);
+      if (mode == Mode::Gap) {
+        constexpr float scale = 0.65f;
+        drive(int(scale * clampf(gapBase + gapSteering, 0, MAX_PWM)),
+              int(scale * clampf(gapBase - gapSteering, 0, MAX_PWM)));
+      } else {
+        // Search the remembered side first, then sweep back. Even zero history recovers.
+        int side = lastLineSide != 0 ? lastLineSide : (BRANCH_PREFERENCE == Branch::Left ? -1 : 1);
+        pivot(now - stateSince < 450 ? side : -side);
+      }
+      return;
+    }
+  }
+  if (!sample.visible)
+  {
+    lostSince = now; gapSteering = recentSteering; gapBase = trackingBase;
+    enter(Mode::Gap, now);
+    drive(int(0.65f * clampf(gapBase + gapSteering, 0, MAX_PWM)),
+          int(0.65f * clampf(gapBase - gapSteering, 0, MAX_PWM)));
     return;
   }
-
-  const int sensor_range = BLACK_MAX_VALUE - BLACK_THRESHOLD;
-
-  const int left_black = constrain(
-      left_value - BLACK_THRESHOLD, 0, sensor_range);
-
-  const int right_black = constrain(
-      right_value - BLACK_THRESHOLD, 0, sensor_range);
-
-  const float error =
-      (right_black - left_black) / static_cast<float>(sensor_range);
-
-  integral += error * dt;
-  integral = constrain(integral, -INTEGRAL_LIMIT, INTEGRAL_LIMIT);
-
-  const float raw_derivative = constrain(
-      (error - previous_error) / dt,
-      -3.0f,
-      3.0f);
-
-  filtered_derivative =
-      (0.7f * filtered_derivative) + (0.3f * raw_derivative);
-
-  const float correction = constrain(
-      (KP * error) + (KI * integral) + (KD * filtered_derivative),
-      -MAX_CORRECTION,
-      MAX_CORRECTION);
-
-  previous_error = error;
-  last_correction = correction;
-
-  const int left_speed = constrain(
-      static_cast<int>(BASE_SPEED - correction),
-      0,
-      MAX_PWM);
-
-  const int right_speed = constrain(
-      static_cast<int>(BASE_SPEED + correction),
-      0,
-      MAX_PWM);
-
-  drive_motors(left_speed, right_speed);
+  bool ambiguous = sample.dark[0] && sample.dark[2];
+  int outer = !sample.dark[1] && !ambiguous ? (sample.dark[2] ? 1 : (sample.dark[0] ? -1 : 0)) : 0;
+  if (outer != 0) {
+    if (!candidateActive || candidateSide != outer) {
+      candidateActive = true; candidateSide = outer; candidateSince = now;
+    }
+    if (now - candidateSince >= CORNER_CONFIRM_MS) {
+      turnSide = outer; lastLineSide = outer; recentSteering = outer * MAX_CORRECTION;
+      enter(Mode::Corner, now); pivot(turnSide); return;
+    }
+  } else candidateActive = false;
+  track(dt, ambiguous);
+}
+void setup()
+{
+  Serial.begin(115200);
+  for (int pin : IR_PINS) pinMode(pin, INPUT);
+  for (int pin : {LEFT_A, LEFT_B, RIGHT_A, RIGHT_B, LEFT_PWM, RIGHT_PWM}) pinMode(pin, OUTPUT);
+  analogReadResolution(12);
+  drive(0, 0);
+  preferences.begin("line-cal", false);
+  preferences.getBytes("white", white, sizeof(white));
+  preferences.getBytes("black", black, sizeof(black));
+  calibrated = validCalibration();
+  Serial.println("Commands: c=calibrate, g=go, s=stop, l=toggle logging. Always starts stopped.");
+  Serial.println(calibrated ? "Saved calibration loaded. Send g when ready." : "No valid calibration. Send c.");
+  previousTick = micros();
+}
+void loop()
+{
+  uint32_t now = millis();
+  // Limit serial work so a burst of input cannot starve the controller.
+  if (Serial.available()) {
+    switch (Serial.read()) {
+      case 'c': startCalibration(now); break;
+      case 'g': if (mode != Mode::Calibrating) arm(now); break;
+      case 's': halt(now); break;
+      case 'l': logging = !logging; break;
+    }
+  }
+  uint32_t tick = micros(), elapsed = tick - previousTick;
+  if (elapsed < CONTROL_US) return;
+  previousTick = tick;
+  // A late cycle invalidates derivative history; use the actual elapsed time.
+  if (elapsed > 4 * CONTROL_US) resetPD();
+  readSensors();
+  control(now, elapsed / 1000000.0f);
+  if (logging && now - lastLog >= 100 && Serial.availableForWrite() >= 100) {
+    lastLog = now;
+    Serial.printf("%lu mode=%d raw=%d,%d,%d e=%.3f pwm=%d,%d\n",
+                  (unsigned long)now, int(mode), sample.raw[0], sample.raw[1], sample.raw[2],
+                  sample.error, commandedLeft, commandedRight);
+  }
 }
