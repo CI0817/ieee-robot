@@ -138,14 +138,14 @@ void pid_drive()
   if (left_black >= PIVOT_BLACK_LEVEL &&
       right_black <= PIVOT_OTHER_SIDE_MAX)
   {
-    drive_motors(-turning_speed, turning_speed);
+    drive_motors(-turning_speed, 0);
     return;
   }
 
   if (right_black >= PIVOT_BLACK_LEVEL &&
       left_black <= PIVOT_OTHER_SIDE_MAX)
   {
-    drive_motors(turning_speed, -turning_speed);
+    drive_motors(0, -turning_speed);
     return;
   }
 
