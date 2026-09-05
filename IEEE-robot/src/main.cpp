@@ -301,15 +301,16 @@ void pid_drive()
     return;
   }
 
-  // Weighted line position:
-  // -1 = line under left, 0 = middle, +1 = right.
-  const float total_black = left_black + middle_black + right_black;
+  // Use the outer sensors for steering. The middle sensor confirms the line
+  // is present, but should not dilute a strong left/right corner correction.
+  const float outer_black = left_black + right_black;
 
   float error = 0.0f;
 
-  if (total_black > 0.01f)
+  if (outer_black > 0.01f)
   {
-    error = (right_black - left_black) / total_black;
+    // -1 = strongly left, 0 = balanced, +1 = strongly right.
+    error = (right_black - left_black) / outer_black;
   }
 
   // Ignore tiny sensor-noise corrections near the center.
