@@ -42,6 +42,32 @@ constexpr float PIVOT_EXIT_BLACK = 0.35f;
 // lower this; if curves still trip pivot, raise it further.
 constexpr int PIVOT_DEBOUNCE_TICKS = 15;
 
+// Measured geometry: sensor array is ~6cm ahead of the wheel axle, which is
+// the point a point-turn actually rotates about (equal-and-opposite wheel
+// speeds cancel translation there). Pivoting the instant a corner is
+// confirmed above therefore rotates around a point ~6cm short of the
+// corner's real vertex. Worked example (square corner, robot driving +x,
+// new line continuing +y): pivoting immediately lands the sensor array at
+// roughly (-6, +6) while the new line is at x=0 -- a 6cm sideways miss,
+// nearly double the full 3.5cm sensor spread, so not just imprecision.
+// Creeping straight first for roughly SENSOR_TO_AXLE_CM brings the axle up
+// to the vertex, so the same point-turn then rotates around approximately
+// the right point and the sensor lands back on the new line instead of
+// beside it. See chat for the full derivation.
+constexpr float SENSOR_TO_AXLE_CM = 6.0f;
+
+// GUESS -- not measured yet. Converts SENSOR_TO_AXLE_CM into a creep
+// duration at straight_speed via an assumed ~30cm/s. Replace
+// ASSUMED_CREEP_SPEED_CM_PER_S with a real measurement (time the robot over
+// a fixed distance at this PWM -- see the calibration test) and recompute,
+// then fine-tune further by watching where the array actually lands after
+// a real 90-degree corner: too short undershoots the vertex (still a
+// sideways miss, just smaller); too long overshoots past it (misses the
+// new line on the other side, or drives onto blank floor first).
+constexpr float ASSUMED_CREEP_SPEED_CM_PER_S = 30.0f;
+constexpr unsigned long PIVOT_CREEP_MS = static_cast<unsigned long>(
+    (SENSOR_TO_AXLE_CM / ASSUMED_CREEP_SPEED_CM_PER_S) * 1000.0f);
+
 // PID steering gains, applied to line_error, a weighted centroid across all
 // three sensors (range -1..1; positive means the line is toward the right
 // sensor). Using all three -- not just outer-sensor difference -- matters
@@ -125,6 +151,14 @@ int8_t pivot_state = 0; // 0 = not pivoting, -1 = pivoting left, 1 = pivoting ri
 int8_t pivot_candidate_side = 0;
 int pivot_candidate_ticks = 0;
 
+// Corner-creep state (see SENSOR_TO_AXLE_CM/PIVOT_CREEP_MS above): 0 = not
+// creeping, otherwise the direction (-1/1) the confirmed corner will pivot
+// once the creep finishes. Runs open-loop on a timer rather than sensor
+// feedback, since the line is expected to disappear under every sensor for
+// some or all of this phase.
+int8_t corner_creep_direction = 0;
+unsigned long corner_creep_started_ms = 0;
+
 // Tracks how long the line has been out of view, for the MAX_BLIND_MS cutoff.
 bool line_was_visible = true;
 unsigned long line_lost_since_ms = 0;
@@ -139,6 +173,7 @@ bool have_prev_error = false;
 
 int determine_drive_mode();
 void pid_drive();
+void drive_pivot(int8_t direction);
 void drive_motors(int left_vel, int right_vel);
 bool check_black(int sensor_pin);
 int black_threshold_for(int sensor_pin);
@@ -189,11 +224,15 @@ int determine_drive_mode()
   const bool middle_black = check_black(middle_ir);
   const bool right_black = check_black(right_ir);
 
-  if (left_black || middle_black || right_black)
+  if (left_black || middle_black || right_black ||
+      pivot_state != 0 || corner_creep_direction != 0)
   {
     // Any sensor seeing black is enough to steer from -- pid_drive() reads
     // the raw analog values itself and decides between smooth steering and
-    // the pivot override.
+    // the pivot override. A confirmed corner maneuver (creep then pivot) is
+    // also routed here even with every sensor reading white, since it runs
+    // open-loop on its own timer and is expected to lose the line for some
+    // or all of it -- see SENSOR_TO_AXLE_CM above.
     line_was_visible = true;
     pid_drive();
     return 1;
@@ -269,6 +308,58 @@ void pid_drive()
   const float right_black =
       right_error / static_cast<float>(right_sensor_range);
 
+  // Corner creep: a confirmed corner (below) doesn't pivot immediately --
+  // it first drives straight, open-loop, for PIVOT_CREEP_MS to bring the
+  // axle up to the corner's vertex before the point-turn starts rotating
+  // about it. See SENSOR_TO_AXLE_CM above for why pivoting immediately
+  // would rotate about the wrong point.
+  if (corner_creep_direction != 0)
+  {
+    if (now_ms - corner_creep_started_ms < PIVOT_CREEP_MS)
+    {
+      // Deliberately ignoring line_error here, not just because there may
+      // not be one -- the point of this phase is to cover a fixed distance
+      // dead-reckoned, so reacting to a fading/ambiguous reading would
+      // undermine that.
+      drive_motors(straight_speed, straight_speed);
+
+      if (should_print)
+      {
+        last_print_ms = now_ms;
+        char buf[80];
+        snprintf(buf, sizeof(buf), "CREEP dir=%d t=%lu L=%d R=%d",
+                 corner_creep_direction, now_ms - corner_creep_started_ms,
+                 last_left_speed, last_right_speed);
+        Serial.println(buf);
+        SerialBT.println(buf);
+      }
+      return;
+    }
+
+    // Creep distance covered -- the axle should now be roughly at the
+    // corner vertex, so hand off straight into the point-turn. Skips the
+    // entry/exit-check block below on this transition tick (rather than
+    // falling into the pivot_state != 0 branch further down) because
+    // line_error right after a creep is likely near zero -- sensor
+    // probably isn't over the line yet, per the geometry above -- and that
+    // would otherwise read as an immediate (bogus) exit condition before a
+    // single rotate command was ever issued.
+    pivot_state = corner_creep_direction;
+    corner_creep_direction = 0;
+    have_prev_error = false; // don't derive across the creep+corner gap once KD is back on
+    drive_pivot(pivot_state);
+
+    if (should_print)
+    {
+      last_print_ms = now_ms;
+      char buf[80];
+      snprintf(buf, sizeof(buf), "PIVOT-START side=%d", pivot_state);
+      Serial.println(buf);
+      SerialBT.println(buf);
+    }
+    return;
+  }
+
   // Sharp-turn pivot override -- see the PIVOT_* constants up top for why
   // this is debounced and hysteretic rather than a plain threshold check.
   if (pivot_state == 0)
@@ -295,7 +386,12 @@ void pid_drive()
 
     if (pivot_candidate_ticks >= PIVOT_DEBOUNCE_TICKS)
     {
-      pivot_state = pivot_candidate_side;
+      // Confirmed corner -- start the creep phase above rather than
+      // pivoting this tick.
+      corner_creep_direction = pivot_candidate_side;
+      corner_creep_started_ms = now_ms;
+      pivot_candidate_side = 0;
+      pivot_candidate_ticks = 0;
     }
   }
   else
@@ -313,22 +409,7 @@ void pid_drive()
 
   if (pivot_state != 0)
   {
-    // True point-turn: both wheels drive, opposite directions, instead of
-    // reversing one wheel while parking the other. The parked-wheel version
-    // only had one motor's worth of angular authority, which on a sharp
-    // corner could be too slow to sweep the sensor array back onto the line
-    // before MAX_BLIND_MS gives up and stops -- looking like the robot
-    // freezing mid-turn. This roughly doubles turn rate for the same
-    // turning_speed; re-check turning_speed once this lands on hardware,
-    // since a faster pivot may now want a lower speed to avoid overshoot.
-    if (pivot_state < 0)
-    {
-      drive_motors(-turning_speed, turning_speed);
-    }
-    else
-    {
-      drive_motors(turning_speed, -turning_speed);
-    }
+    drive_pivot(pivot_state);
 
     if (should_print)
     {
@@ -396,6 +477,26 @@ void pid_drive()
              line_error, derivative, correction, last_left_speed, last_right_speed);
     Serial.println(buf);
     SerialBT.println(buf);
+  }
+}
+
+void drive_pivot(int8_t direction)
+{
+  // True point-turn: both wheels drive, opposite directions, instead of
+  // reversing one wheel while parking the other. The parked-wheel version
+  // only had one motor's worth of angular authority, which on a sharp
+  // corner could be too slow to sweep the sensor array back onto the line
+  // before MAX_BLIND_MS gives up and stops -- looking like the robot
+  // freezing mid-turn. This roughly doubles turn rate for the same
+  // turning_speed; re-check turning_speed once this lands on hardware,
+  // since a faster pivot may now want a lower speed to avoid overshoot.
+  if (direction < 0)
+  {
+    drive_motors(-turning_speed, turning_speed);
+  }
+  else
+  {
+    drive_motors(turning_speed, -turning_speed);
   }
 }
 
