@@ -7,6 +7,11 @@ constexpr float PIVOT_OTHER_SIDE_MAX = 0.10f;
 int last_left_speed = 0;
 int last_right_speed = 0;
 
+constexpr float KP = 55.0f;
+constexpr float KD = 7.0f;
+constexpr float MAX_CORRECTION = 60.0f;
+constexpr float CENTER_DEADBAND = 0.04f;
+
 // Per-sensor calibration values measured on this robot.
 // constexpr int LEFT_BLACK_THRESHOLD = 75;
 // constexpr int MIDDLE_BLACK_THRESHOLD = 45;
@@ -113,55 +118,96 @@ void pid_drive()
 {
   capacitor_zone = false;
 
+  static float previous_error = 0.0f;
+  static float filtered_derivative = 0.0f;
+  static unsigned long previous_time_us = 0;
+
+  const unsigned long now_us = micros();
+
+  float dt = (previous_time_us == 0)
+                 ? 0.01f
+                 : (now_us - previous_time_us) / 1000000.0f;
+
+  previous_time_us = now_us;
+  dt = constrain(dt, 0.002f, 0.05f);
+
   const int left_value = analogRead(left_ir);
+  const int middle_value = analogRead(middle_ir);
   const int right_value = analogRead(right_ir);
-
-  const int left_sensor_range =
-      LEFT_BLACK_MAX - LEFT_BLACK_THRESHOLD;
-
-  const int right_sensor_range =
-      RIGHT_BLACK_MAX - RIGHT_BLACK_THRESHOLD;
 
   const float left_black = constrain(
       (left_value - LEFT_BLACK_THRESHOLD) /
-          static_cast<float>(left_sensor_range),
+          static_cast<float>(LEFT_BLACK_MAX - LEFT_BLACK_THRESHOLD),
+      0.0f,
+      1.0f);
+
+  const float middle_black = constrain(
+      (middle_value - MIDDLE_BLACK_THRESHOLD) /
+          static_cast<float>(MIDDLE_BLACK_MAX - MIDDLE_BLACK_THRESHOLD),
       0.0f,
       1.0f);
 
   const float right_black = constrain(
       (right_value - RIGHT_BLACK_THRESHOLD) /
-          static_cast<float>(right_sensor_range),
+          static_cast<float>(RIGHT_BLACK_MAX - RIGHT_BLACK_THRESHOLD),
       0.0f,
       1.0f);
 
-  // Very strong black on only one side: pivot on the spot.
+  // Preserve pivoting only for an obvious sharp corner.
   if (left_black >= PIVOT_BLACK_LEVEL &&
       right_black <= PIVOT_OTHER_SIDE_MAX)
   {
-    drive_motors(-turning_speed/2, turning_speed/2);
+    drive_motors(-turning_speed / 2, turning_speed / 2);
     return;
   }
 
   if (right_black >= PIVOT_BLACK_LEVEL &&
       left_black <= PIVOT_OTHER_SIDE_MAX)
   {
-    drive_motors(turning_speed/2, -turning_speed/2);
+    drive_motors(turning_speed / 2, -turning_speed / 2);
     return;
   }
 
-  // Normal proportional/PID-style steering.
-  constexpr int MAX_CORRECTION = 100;
+  // Weighted line position:
+  // -1 = line under left, 0 = middle, +1 = right.
+  const float total_black = left_black + middle_black + right_black;
 
-  const int correction = static_cast<int>(
-      (right_black - left_black) * MAX_CORRECTION);
+  float error = 0.0f;
+
+  if (total_black > 0.01f)
+  {
+    error = (right_black - left_black) / total_black;
+  }
+
+  // Ignore tiny sensor-noise corrections near the center.
+  if (fabsf(error) < CENTER_DEADBAND)
+  {
+    error = 0.0f;
+  }
+
+  const float raw_derivative = constrain(
+      (error - previous_error) / dt,
+      -4.0f,
+      4.0f);
+
+  // Smooth derivative so sensor noise does not cause rapid steering changes.
+  filtered_derivative =
+      (0.75f * filtered_derivative) + (0.25f * raw_derivative);
+
+  const float correction = constrain(
+      (KP * error) + (KD * filtered_derivative),
+      -MAX_CORRECTION,
+      MAX_CORRECTION);
+
+  previous_error = error;
 
   const int left_speed = constrain(
-      straight_speed + correction,
+      static_cast<int>(straight_speed + correction),
       -MAX_PWM,
       MAX_PWM);
 
   const int right_speed = constrain(
-      straight_speed - correction,
+      static_cast<int>(straight_speed - correction),
       -MAX_PWM,
       MAX_PWM);
 
