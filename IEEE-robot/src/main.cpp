@@ -1,5 +1,12 @@
 #include <Arduino.h>
 
+// Pivot only when one side sees a very strong line and the other is mostly clear.
+constexpr float PIVOT_BLACK_LEVEL = 0.55f;
+constexpr float PIVOT_OTHER_SIDE_MAX = 0.10f;
+
+int last_left_speed = 0;
+int last_right_speed = 0;
+
 // Per-sensor calibration values measured on this robot.
 // constexpr int LEFT_BLACK_THRESHOLD = 75;
 // constexpr int MIDDLE_BLACK_THRESHOLD = 45;
@@ -71,126 +78,94 @@ void loop()
 
 int determine_drive_mode()
 {
-  if (check_black(middle_ir))
-  {
+  const bool left_black = check_black(left_ir);
+  const bool middle_black = check_black(middle_ir);
+  const bool right_black = check_black(right_ir);
 
-    if (check_black(left_ir) && check_black(right_ir))
-    {
-      // A wide line or intersection can cover all three sensors; keep tracking.
-      capacitor_zone = false;
-      pid_drive();
-      return 1;
-    }
-    else
-    {
-      // If the middle IR sensor detects black, drive in PID mode
-      pid_drive();
-      return 1; // PID drive mode
-    }
-  }
-
-  else if (check_black(left_ir) && check_black(right_ir))
+  // Any visible line: PID decides between smooth steering and pivot override.
+  if (left_black || middle_black || right_black)
   {
-    // If both left and right IR sensors detect black, drive straight
-    drive_motors(straight_speed, straight_speed); // Drive straight
-    return 2;                                     // Straight drive mode
-  }
-
-  else if (check_black(left_ir))
-  {
-    // If only the left IR sensor detects black, turn left
     pid_drive();
-    // drive_motors(-turning_speed, turning_speed); // Turn left
-    return 3; // Left turn mode
+    return 1;
   }
 
-  else if (check_black(right_ir))
+  // No visible line: explicitly keep the most recent motor command.
+  if (capacitor_zone)
   {
-    // If only the right IR sensor detects black, turn right
-    pid_drive();
-    // drive_motors(turning_speed, -turning_speed); // Turn right
-    return 4; // Right turn mode
+    drive_motors(straight_speed, straight_speed);
+
+    while (!check_black(left_ir) &&
+           !check_black(middle_ir) &&
+           !check_black(right_ir))
+    {
+      delay(10);
+    }
+
+    stop();
+    return 5;
   }
 
-  else
-  { // No sensors detect black
-    if (capacitor_zone)
-    {
-      // If we are in the capacitor zone, drive straight
-      drive_motors(straight_speed, straight_speed); // Drive straight
-      while (!check_black(left_ir) &&
-             !check_black(middle_ir) &&
-             !check_black(right_ir))
-      {
-        delay(10);
-      }
-      stop();
-      return 5; // Straight drive mode in capacitor zone
-    }
-    else
-    {
-      // Spin to search for the line
-      // drive_motors(turning_speed, -turning_speed); // Spin in place
-      // Serial.print("\nSearching for line");
-      // pid_drive();
-      // TODO: add some kind of counter to track when lost. line
-      return 0; // Search mode
-    }
-  }
+  drive_motors(last_left_speed, last_right_speed);
+  return 0;
 }
 
 void pid_drive()
 {
-  // Serial.print("\nPID Mode");
   capacitor_zone = false;
 
   const int left_value = analogRead(left_ir);
   const int right_value = analogRead(right_ir);
 
-  // // Strong black: turn in place toward the detected side.
-  // if (left_value >= BLACK_MAX_VALUE)
-  // {
-  //   drive_motors(-turning_speed, turning_speed);
-  //   return;
-  // }
+  const int left_sensor_range =
+      LEFT_BLACK_MAX - LEFT_BLACK_THRESHOLD;
 
-  // if (right_value >= BLACK_MAX_VALUE)
-  // {
-  //   drive_motors(turning_speed, -turning_speed);
-  //   return;
-  // }
+  const int right_sensor_range =
+      RIGHT_BLACK_MAX - RIGHT_BLACK_THRESHOLD;
 
-  const int left_sensor_range = LEFT_BLACK_MAX - LEFT_BLACK_THRESHOLD;
-  const int right_sensor_range = RIGHT_BLACK_MAX - RIGHT_BLACK_THRESHOLD;
-  const int max_correction = 80;
+  const float left_black = constrain(
+      (left_value - LEFT_BLACK_THRESHOLD) /
+          static_cast<float>(left_sensor_range),
+      0.0f,
+      1.0f);
 
-  const int left_error = constrain(
-      left_value - LEFT_BLACK_THRESHOLD, 0, left_sensor_range);
+  const float right_black = constrain(
+      (right_value - RIGHT_BLACK_THRESHOLD) /
+          static_cast<float>(right_sensor_range),
+      0.0f,
+      1.0f);
 
-  const int right_error = constrain(
-      right_value - RIGHT_BLACK_THRESHOLD, 0, right_sensor_range);
+  // Very strong black on only one side: pivot on the spot.
+  if (left_black >= PIVOT_BLACK_LEVEL &&
+      right_black <= PIVOT_OTHER_SIDE_MAX)
+  {
+    drive_motors(-turning_speed, turning_speed);
+    return;
+  }
 
-  const float left_black =
-      left_error / static_cast<float>(left_sensor_range);
-  const float right_black =
-      right_error / static_cast<float>(right_sensor_range);
+  if (right_black >= PIVOT_BLACK_LEVEL &&
+      left_black <= PIVOT_OTHER_SIDE_MAX)
+  {
+    drive_motors(turning_speed, -turning_speed);
+    return;
+  }
 
-  // Left black -> negative correction -> left slows, right speeds up.
-  // Right black -> positive correction -> left speeds up, right slows.
+  // Normal proportional/PID-style steering.
+  constexpr int MAX_CORRECTION = 80;
+
   const int correction = static_cast<int>(
-      (right_black - left_black) * max_correction);
+      (right_black - left_black) * MAX_CORRECTION);
 
   const int left_speed = constrain(
-      straight_speed + correction, -MAX_PWM, MAX_PWM);
+      straight_speed + correction,
+      -MAX_PWM,
+      MAX_PWM);
 
   const int right_speed = constrain(
-      straight_speed - correction, -MAX_PWM, MAX_PWM);
+      straight_speed - correction,
+      -MAX_PWM,
+      MAX_PWM);
 
   drive_motors(left_speed, right_speed);
-  // Serial.print("\nLeft speed: ");
-  // Serial.print(left_speed);
-  // Serial.print(" | Right speed: ");
-  // Serial.println(right_speed);
 }
 
 // int calculate_pid_speed(int sensor_pin)
@@ -252,6 +227,9 @@ void set_motor(int pwm_pin, int direction_pin_1, int direction_pin_2, int veloci
 
 void drive_motors(int left_vel, int right_vel)
 {
+  last_left_speed = left_vel;
+  last_right_speed = right_vel;
+
   set_motor(left_pwm, left_motorA, left_motorB, left_vel);
   set_motor(right_pwm, right_motorA, right_motorB, right_vel);
 }
