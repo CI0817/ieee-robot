@@ -7,6 +7,13 @@ constexpr float PIVOT_OTHER_SIDE_MAX = 0.10f;
 int last_left_speed = 0;
 int last_right_speed = 0;
 
+constexpr float TRIPLE_BLACK_SPEED_SCALE = 0.40f;
+// Fraction of each calibrated black range required to count as “detected.”
+constexpr float DETECT_BLACK_LEVEL = 0.15f;
+
+int last_heading_left_speed = 100;
+int last_heading_right_speed = 100;
+
 constexpr float KP = 55.0f;
 constexpr float KD = 7.0f;
 constexpr float MAX_CORRECTION = 60.0f;
@@ -87,22 +94,28 @@ int determine_drive_mode()
   const bool middle_black = check_black(middle_ir);
   const bool right_black = check_black(right_ir);
 
-  // All three sensors black: likely crossing a sharp 90-degree corner.
-  // Keep the last steering command instead of recalculating a centered error.
+  // Triple black: preserve the previous PD heading, but travel slowly
+  // until the robot leaves this wide black region.
   if (left_black && middle_black && right_black)
   {
-    drive_motors(last_left_speed, last_right_speed);
-    return 6; // Triple-black continuation mode
+    const int slow_left_speed = static_cast<int>(
+        last_heading_left_speed * TRIPLE_BLACK_SPEED_SCALE);
+
+    const int slow_right_speed = static_cast<int>(
+        last_heading_right_speed * TRIPLE_BLACK_SPEED_SCALE);
+
+    drive_motors(slow_left_speed, slow_right_speed);
+    return 6;
   }
 
-  // Any other visible line pattern: use smooth PD steering.
+  // One or two sensors on black: return to normal PD steering.
   if (left_black || middle_black || right_black)
   {
     pid_drive();
     return 1;
   }
 
-  // No line: keep the previous steering command through a gap.
+  // All white: continue the previous command through a line gap.
   if (capacitor_zone)
   {
     drive_motors(straight_speed, straight_speed);
@@ -219,6 +232,10 @@ void pid_drive()
       -MAX_PWM,
       MAX_PWM);
 
+  // Save the normal PD heading before issuing the motor command.
+  last_heading_left_speed = left_speed;
+  last_heading_right_speed = right_speed;
+
   drive_motors(left_speed, right_speed);
 }
 
@@ -298,15 +315,20 @@ int black_threshold_for(int sensor_pin)
 {
   if (sensor_pin == left_ir)
   {
-    return LEFT_BLACK_THRESHOLD;
+    return LEFT_BLACK_THRESHOLD + static_cast<int>(
+        (LEFT_BLACK_MAX - LEFT_BLACK_THRESHOLD) * DETECT_BLACK_LEVEL);
   }
 
   if (sensor_pin == middle_ir)
   {
-    return MIDDLE_BLACK_THRESHOLD;
+    return MIDDLE_BLACK_THRESHOLD + static_cast<int>(
+        (MIDDLE_BLACK_MAX - MIDDLE_BLACK_THRESHOLD) *
+        DETECT_BLACK_LEVEL);
   }
 
-  return RIGHT_BLACK_THRESHOLD;
+  return RIGHT_BLACK_THRESHOLD + static_cast<int>(
+      (RIGHT_BLACK_MAX - RIGHT_BLACK_THRESHOLD) *
+      DETECT_BLACK_LEVEL);
 }
 
 void end_zone()
