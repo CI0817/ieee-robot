@@ -4,23 +4,15 @@
 // Pivot only when one side sees a very strong line and the other is mostly clear.
 constexpr float PIVOT_BLACK_LEVEL = 0.90f;
 constexpr float PIVOT_OTHER_SIDE_MAX = 0.10f;
-constexpr float TRIPLE_TURN_SCALE = 3.0f;
 
 int last_left_speed = 0;
 int last_right_speed = 0;
-int previous_black_sensor_count = 0;
-bool triple_black_active = false;
-bool triple_black_is_corner = false;
 
-constexpr float TRIPLE_BLACK_SPEED_SCALE = 0.35f;
-constexpr int MIN_TRIPLE_MOVING_PWM = 40;
 constexpr float WHITE_GAP_SPEED_SCALE = 0.40f;
 constexpr int WHITE_GAP_MAX_READING = 35;
 // Fraction of each calibrated black range required to count as “detected.”
 constexpr float DETECT_BLACK_LEVEL = 0.15f;
 
-int last_heading_left_speed = 100;
-int last_heading_right_speed = 100;
 int white_gap_left_speed = 0;
 int white_gap_right_speed = 0;
 bool white_gap_active = false;
@@ -69,7 +61,14 @@ bool capacitor_zone = false;
 // End-zone marker timing. Tune these against the robot speed and the physical
 // width of the detached entry line/gap. The expected pattern is:
 // all black (entry line) -> all white (gap) -> all black (end zone).
+//
+// ENTRY_LINE and ENTRY_GAP both tolerate readings that are neither solidly
+// black nor genuinely white for a bounded window (a real analog sensor
+// crossing a physical edge essentially never jumps cleanly between the two
+// on a single poll), only giving up once that ambiguous stretch drags on too
+// long to plausibly be part of the marker.
 constexpr uint32_t END_ZONE_ENTRY_LINE_MIN_MS = 50;
+constexpr uint32_t END_ZONE_ENTRY_LINE_MAX_MS = 300;
 constexpr uint32_t END_ZONE_GAP_MAX_MS = 600;
 constexpr uint32_t END_ZONE_BLACK_CONFIRM_MS = 250;
 
@@ -91,14 +90,17 @@ int calculate_pid_speed(int sensor_pin);
 void drive_motors(int left_vel, int right_vel);
 bool check_black(int sensor_pin);
 int black_threshold_for(int sensor_pin);
-int apply_minimum_triple_pwm(int velocity);
 void end_zone();
 void stop();
 bool update_end_zone_detector(bool left_black, bool middle_black,
                               bool right_black, bool all_very_white);
+const char *end_zone_state_name(EndZoneState state);
+void set_end_zone_state(EndZoneState new_state, uint32_t now_ms);
 
 void setup()
 {
+  Serial.begin(115200);
+
   pinMode(left_ir, INPUT);
   pinMode(middle_ir, INPUT);
   pinMode(right_ir, INPUT);
@@ -114,7 +116,6 @@ void setup()
   ledcSetup(RIGHT_PWM_CHANNEL, PWM_FREQUENCY, PWM_RESOLUTION);
   ledcAttachPin(left_pwm, LEFT_PWM_CHANNEL);
   ledcAttachPin(right_pwm, RIGHT_PWM_CHANNEL);
-  // Serial.begin(9600);
 }
 
 void loop()
@@ -153,69 +154,13 @@ int determine_drive_mode()
     return 8;
   }
 
-  const int black_sensor_count =
-      static_cast<int>(left_black) +
-      static_cast<int>(middle_black) +
-      static_cast<int>(right_black);
-
-  if (black_sensor_count == 3 && previous_black_sensor_count != 3)
-  {
-    triple_black_active = true;
-    triple_black_is_corner = (previous_black_sensor_count == 2);
-  }
-  else if (black_sensor_count != 3)
-  {
-    triple_black_active = false;
-  }
-
-  previous_black_sensor_count = black_sensor_count;
-
   if (!all_very_white)
   {
     white_gap_active = false;
   }
 
-  // Triple black: preserve the previous PD heading, but travel slowly
-  // until the robot leaves this wide black region.
-  if (triple_black_active)
-  {
-    // Entering triple black from zero or one black sensor is treated as an
-    // obstacle: continue straight rather than initiating a corner turn.
-    if (!triple_black_is_corner)
-    {
-      drive_motors(straight_speed, straight_speed);
-      return 7;
-    }
-
-    // Separate the previous heading into forward motion and turn amount.
-    const float heading_forward =
-        (last_heading_left_speed + last_heading_right_speed) / 2.0f;
-
-    const float heading_turn =
-        (last_heading_left_speed - last_heading_right_speed) / 2.0f;
-
-    // Slow forward travel, but preserve/amplify the steering difference.
-    const int slow_left_speed = constrain(
-        static_cast<int>(
-            (heading_forward * TRIPLE_BLACK_SPEED_SCALE) +
-            (heading_turn * TRIPLE_TURN_SCALE)),
-        -MAX_PWM,
-        MAX_PWM);
-
-    const int slow_right_speed = constrain(
-        static_cast<int>(
-            (heading_forward * TRIPLE_BLACK_SPEED_SCALE) -
-            (heading_turn * TRIPLE_TURN_SCALE)),
-        -MAX_PWM,
-        MAX_PWM);
-
-    drive_motors(
-        apply_minimum_triple_pwm(slow_left_speed),
-        apply_minimum_triple_pwm(slow_right_speed));
-    return 6;
-  }
-
-  // One or two sensors on black: return to normal PD steering.
+  // Any sensor on black (including all three at once, e.g. a wide corner or
+  // an intersection): normal PD steering handles it directly.
   if (left_black || middle_black || right_black)
   {
     pid_drive();
@@ -230,11 +175,8 @@ int determine_drive_mode()
     return 2;
   }
 
-  // same scaled pair preserves the curve without reducing it every loop.
-  // it is present, but should not dilute a strong left/right corner correction.
   // Capture the last heading once on entry to a genuinely white gap. Replaying
   // the same scaled pair preserves the curve without reducing it every loop.
-  // same scaled pair preserves the curve without reducing it every loop.
   if (!white_gap_active)
   {
     white_gap_left_speed = last_left_speed;
@@ -353,10 +295,6 @@ void pid_drive()
       -MAX_PWM,
       MAX_PWM);
 
-  // Save the normal PD heading before issuing the motor command.
-  last_heading_left_speed = left_speed;
-  last_heading_right_speed = right_speed;
-
   drive_motors(left_speed, right_speed);
 }
 
@@ -452,26 +390,43 @@ int black_threshold_for(int sensor_pin)
       DETECT_BLACK_LEVEL);
 }
 
-int apply_minimum_triple_pwm(int velocity)
-{
-  if (velocity > 0 && velocity < MIN_TRIPLE_MOVING_PWM)
-  {
-    return MIN_TRIPLE_MOVING_PWM;
-  }
-
-  if (velocity < 0 && velocity > -MIN_TRIPLE_MOVING_PWM)
-  {
-    return -MIN_TRIPLE_MOVING_PWM;
-  }
-
-  return velocity;
-}
-
 void end_zone()
 {
   capacitor_zone = false; // Reset capacitor zone flag
   stop();                 // Stop the motors
   begin_ball_retrieval();
+}
+
+const char *end_zone_state_name(EndZoneState state)
+{
+  switch (state)
+  {
+  case EndZoneState::FOLLOWING_LINE:
+    return "FOLLOWING_LINE";
+  case EndZoneState::ENTRY_LINE:
+    return "ENTRY_LINE";
+  case EndZoneState::ENTRY_GAP:
+    return "ENTRY_GAP";
+  case EndZoneState::CONFIRMING_ZONE:
+    return "CONFIRMING_ZONE";
+  case EndZoneState::IN_END_ZONE:
+    return "IN_END_ZONE";
+  }
+  return "UNKNOWN";
+}
+
+void set_end_zone_state(EndZoneState new_state, uint32_t now_ms)
+{
+  if (new_state != end_zone_state)
+  {
+    Serial.print("[EndZone] ");
+    Serial.print(end_zone_state_name(end_zone_state));
+    Serial.print(" -> ");
+    Serial.println(end_zone_state_name(new_state));
+  }
+
+  end_zone_state = new_state;
+  end_zone_state_started_ms = now_ms;
 }
 
 bool update_end_zone_detector(bool left_black, bool middle_black,
@@ -485,40 +440,55 @@ bool update_end_zone_detector(bool left_black, bool middle_black,
   case EndZoneState::FOLLOWING_LINE:
     if (all_black)
     {
-      end_zone_state = EndZoneState::ENTRY_LINE;
-      end_zone_state_started_ms = now_ms;
+      set_end_zone_state(EndZoneState::ENTRY_LINE, now_ms);
     }
     break;
 
   case EndZoneState::ENTRY_LINE:
-    // A normal corner/intersection should not trigger the detector unless it
-    // is a sufficiently wide black line followed by the required white gap.
-    if (!all_black)
+    if (all_black)
     {
-      if (now_ms - end_zone_state_started_ms >= END_ZONE_ENTRY_LINE_MIN_MS &&
-          all_very_white)
+      // Still on the entry line; keep waiting for it to end.
+      break;
+    }
+
+    if (all_very_white)
+    {
+      // Only treat this as the deliberate marker gap if the black line
+      // beforehand was wide enough to not be ordinary line noise/a corner.
+      if (now_ms - end_zone_state_started_ms >= END_ZONE_ENTRY_LINE_MIN_MS)
       {
-        end_zone_state = EndZoneState::ENTRY_GAP;
-        end_zone_state_started_ms = now_ms;
+        set_end_zone_state(EndZoneState::ENTRY_GAP, now_ms);
       }
       else
       {
-        end_zone_state = EndZoneState::FOLLOWING_LINE;
+        set_end_zone_state(EndZoneState::FOLLOWING_LINE, now_ms);
       }
+      break;
+    }
+
+    // Neither solidly black nor genuinely white: almost certainly the
+    // sensor crossing the physical edge between the line and the gap, not a
+    // real transition to a new state yet. Keep waiting rather than giving up
+    // on a single ambiguous reading, but bail out if this drags on (i.e.
+    // this was never heading toward a real gap).
+    if (now_ms - end_zone_state_started_ms > END_ZONE_ENTRY_LINE_MAX_MS)
+    {
+      set_end_zone_state(EndZoneState::FOLLOWING_LINE, now_ms);
     }
     break;
 
   case EndZoneState::ENTRY_GAP:
     if (all_black)
     {
-      end_zone_state = EndZoneState::CONFIRMING_ZONE;
-      end_zone_state_started_ms = now_ms;
+      set_end_zone_state(EndZoneState::CONFIRMING_ZONE, now_ms);
+      break;
     }
-    else if (!all_very_white ||
-             now_ms - end_zone_state_started_ms > END_ZONE_GAP_MAX_MS)
+
+    // Tolerate ambiguous readings for the same reason as ENTRY_LINE; only
+    // give up once the whole gap has taken too long to resolve into black.
+    if (now_ms - end_zone_state_started_ms > END_ZONE_GAP_MAX_MS)
     {
-      // The expected disconnected gap was interrupted or became too long.
-      end_zone_state = EndZoneState::FOLLOWING_LINE;
+      set_end_zone_state(EndZoneState::FOLLOWING_LINE, now_ms);
     }
     break;
 
@@ -526,12 +496,13 @@ bool update_end_zone_detector(bool left_black, bool middle_black,
     if (!all_black)
     {
       // A short black segment after the gap was not the end zone.
-      end_zone_state = EndZoneState::FOLLOWING_LINE;
+      set_end_zone_state(EndZoneState::FOLLOWING_LINE, now_ms);
+      break;
     }
-    else if (now_ms - end_zone_state_started_ms >=
-             END_ZONE_BLACK_CONFIRM_MS)
+
+    if (now_ms - end_zone_state_started_ms >= END_ZONE_BLACK_CONFIRM_MS)
     {
-      end_zone_state = EndZoneState::IN_END_ZONE;
+      set_end_zone_state(EndZoneState::IN_END_ZONE, now_ms);
       end_zone();
     }
     break;
