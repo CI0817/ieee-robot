@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <BallRetrieve.h>
 
 // Pivot only when one side sees a very strong line and the other is mostly clear.
 constexpr float PIVOT_BLACK_LEVEL = 0.90f;
@@ -65,6 +66,25 @@ const int left_pwm = 21;
 const int right_pwm = 16;
 bool capacitor_zone = false;
 
+// End-zone marker timing. Tune these against the robot speed and the physical
+// width of the detached entry line/gap. The expected pattern is:
+// all black (entry line) -> all white (gap) -> all black (end zone).
+constexpr uint32_t END_ZONE_ENTRY_LINE_MIN_MS = 50;
+constexpr uint32_t END_ZONE_GAP_MAX_MS = 600;
+constexpr uint32_t END_ZONE_BLACK_CONFIRM_MS = 250;
+
+enum class EndZoneState : uint8_t
+{
+  FOLLOWING_LINE,
+  ENTRY_LINE,
+  ENTRY_GAP,
+  CONFIRMING_ZONE,
+  IN_END_ZONE,
+};
+
+EndZoneState end_zone_state = EndZoneState::FOLLOWING_LINE;
+uint32_t end_zone_state_started_ms = 0;
+
 int determine_drive_mode();
 void pid_drive();
 int calculate_pid_speed(int sensor_pin);
@@ -74,6 +94,8 @@ int black_threshold_for(int sensor_pin);
 int apply_minimum_triple_pwm(int velocity);
 void end_zone();
 void stop();
+bool update_end_zone_detector(bool left_black, bool middle_black,
+                              bool right_black, bool all_very_white);
 
 void setup()
 {
@@ -97,7 +119,13 @@ void setup()
 
 void loop()
 {
-  // drive_motors(50, 50);
+  if (end_zone_state == EndZoneState::IN_END_ZONE)
+  {
+    const BallRetrieveCommand command = update_ball_retrieval();
+    drive_motors(command.left_speed, command.right_speed);
+    return;
+  }
+
   determine_drive_mode();
 }
 
@@ -115,6 +143,15 @@ int determine_drive_mode()
       left_value <= WHITE_GAP_MAX_READING &&
       middle_value <= WHITE_GAP_MAX_READING &&
       right_value <= WHITE_GAP_MAX_READING;
+
+  // This only takes control after the complete marker, gap, and sustained
+  // black-zone sequence has been observed. Until then, normal driving below
+  // receives exactly the same sensor readings and motor commands as before.
+  if (update_end_zone_detector(left_black, middle_black, right_black,
+                                all_very_white))
+  {
+    return 8;
+  }
 
   const int black_sensor_count =
       static_cast<int>(left_black) +
@@ -434,7 +471,77 @@ void end_zone()
 {
   capacitor_zone = false; // Reset capacitor zone flag
   stop();                 // Stop the motors
-  // Additional logic for end zone can be added here
+  begin_ball_retrieval();
+}
+
+bool update_end_zone_detector(bool left_black, bool middle_black,
+                              bool right_black, bool all_very_white)
+{
+  const bool all_black = left_black && middle_black && right_black;
+  const uint32_t now_ms = millis();
+
+  switch (end_zone_state)
+  {
+  case EndZoneState::FOLLOWING_LINE:
+    if (all_black)
+    {
+      end_zone_state = EndZoneState::ENTRY_LINE;
+      end_zone_state_started_ms = now_ms;
+    }
+    break;
+
+  case EndZoneState::ENTRY_LINE:
+    // A normal corner/intersection should not trigger the detector unless it
+    // is a sufficiently wide black line followed by the required white gap.
+    if (!all_black)
+    {
+      if (now_ms - end_zone_state_started_ms >= END_ZONE_ENTRY_LINE_MIN_MS &&
+          all_very_white)
+      {
+        end_zone_state = EndZoneState::ENTRY_GAP;
+        end_zone_state_started_ms = now_ms;
+      }
+      else
+      {
+        end_zone_state = EndZoneState::FOLLOWING_LINE;
+      }
+    }
+    break;
+
+  case EndZoneState::ENTRY_GAP:
+    if (all_black)
+    {
+      end_zone_state = EndZoneState::CONFIRMING_ZONE;
+      end_zone_state_started_ms = now_ms;
+    }
+    else if (!all_very_white ||
+             now_ms - end_zone_state_started_ms > END_ZONE_GAP_MAX_MS)
+    {
+      // The expected disconnected gap was interrupted or became too long.
+      end_zone_state = EndZoneState::FOLLOWING_LINE;
+    }
+    break;
+
+  case EndZoneState::CONFIRMING_ZONE:
+    if (!all_black)
+    {
+      // A short black segment after the gap was not the end zone.
+      end_zone_state = EndZoneState::FOLLOWING_LINE;
+    }
+    else if (now_ms - end_zone_state_started_ms >=
+             END_ZONE_BLACK_CONFIRM_MS)
+    {
+      end_zone_state = EndZoneState::IN_END_ZONE;
+      end_zone();
+    }
+    break;
+
+  case EndZoneState::IN_END_ZONE:
+    // Latch the state: line following must not resume during ball capture.
+    return true;
+  }
+
+  return end_zone_state == EndZoneState::IN_END_ZONE;
 }
 
 void stop()
