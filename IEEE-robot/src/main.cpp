@@ -1,5 +1,20 @@
 #include <Arduino.h>
 
+constexpr float TRIPLE_BLACK_LEVEL = 0.70f;
+
+bool triple_black_latched = false;
+
+bool is_strong_triple_black();
+
+constexpr int CORNER_PIVOT_SPEED = 130;
+constexpr unsigned long MIN_CORNER_PIVOT_MS = 250;
+constexpr unsigned long MAX_CORNER_PIVOT_MS = 900;
+constexpr float DIRECTION_SAVE_ERROR = 0.08f;
+
+int last_turn_direction = 1; // 1 = right, -1 = left
+bool corner_turn_active = false;
+unsigned long corner_turn_start_ms = 0;
+
 // Pivot only when one side sees a very strong line and the other is mostly clear.
 constexpr float PIVOT_BLACK_LEVEL = 0.90f;
 constexpr float PIVOT_OTHER_SIDE_MAX = 0.10f;
@@ -87,37 +102,71 @@ int determine_drive_mode()
   const bool middle_black = check_black(middle_ir);
   const bool right_black = check_black(right_ir);
 
-  // All three sensors black: likely crossing a sharp 90-degree corner.
-  // Keep the last steering command instead of recalculating a centered error.
-  if (left_black && middle_black && right_black)
+  const bool strong_triple_black = is_strong_triple_black();
+  const unsigned long now_ms = millis();
+
+  // Rearm the next corner only after this strong triple-black patch clears.
+  if (!strong_triple_black)
   {
-    drive_motors(last_left_speed, last_right_speed);
-    return 6; // Triple-black continuation mode
+    triple_black_latched = false;
   }
 
-  // Any other visible line pattern: use smooth PD steering.
+  // Continue an already-started corner pivot.
+  if (corner_turn_active)
+  {
+    const unsigned long elapsed_ms = now_ms - corner_turn_start_ms;
+
+    const bool centered_on_new_line =
+        middle_black && !left_black && !right_black;
+
+    const bool must_keep_pivoting =
+        elapsed_ms < MIN_CORNER_PIVOT_MS ||
+        (!centered_on_new_line && elapsed_ms < MAX_CORNER_PIVOT_MS);
+
+    if (must_keep_pivoting)
+    {
+      if (last_turn_direction > 0)
+      {
+        drive_motors(CORNER_PIVOT_SPEED, -CORNER_PIVOT_SPEED);
+      }
+      else
+      {
+        drive_motors(-CORNER_PIVOT_SPEED, CORNER_PIVOT_SPEED);
+      }
+
+      return 6;
+    }
+
+    corner_turn_active = false;
+  }
+
+  // Start one committed pivot only for genuinely strong triple black.
+  if (strong_triple_black && !triple_black_latched)
+  {
+    triple_black_latched = true;
+    corner_turn_active = true;
+    corner_turn_start_ms = now_ms;
+
+    if (last_turn_direction > 0)
+    {
+      drive_motors(CORNER_PIVOT_SPEED, -CORNER_PIVOT_SPEED);
+    }
+    else
+    {
+      drive_motors(-CORNER_PIVOT_SPEED, CORNER_PIVOT_SPEED);
+    }
+
+    return 6;
+  }
+
+  // Normal line following.
   if (left_black || middle_black || right_black)
   {
     pid_drive();
     return 1;
   }
 
-  // No line: keep the previous steering command through a gap.
-  if (capacitor_zone)
-  {
-    drive_motors(straight_speed, straight_speed);
-
-    while (!check_black(left_ir) &&
-           !check_black(middle_ir) &&
-           !check_black(right_ir))
-    {
-      delay(10);
-    }
-
-    stop();
-    return 5;
-  }
-
+  // Continue the last command through a line gap.
   drive_motors(last_left_speed, last_right_speed);
   return 0;
 }
@@ -185,6 +234,15 @@ void pid_drive()
   if (total_black > 0.01f)
   {
     error = (right_black - left_black) / total_black;
+  }
+
+  if (error > DIRECTION_SAVE_ERROR)
+  {
+    last_turn_direction = 1; // right
+  }
+  else if (error < -DIRECTION_SAVE_ERROR)
+  {
+    last_turn_direction = -1; // left
   }
 
   // Ignore tiny sensor-noise corrections near the center.
@@ -319,4 +377,33 @@ void end_zone()
 void stop()
 {
   drive_motors(0, 0); // Stop the motors
+}
+
+bool is_strong_triple_black()
+{
+  const int left_value = analogRead(left_ir);
+  const int middle_value = analogRead(middle_ir);
+  const int right_value = analogRead(right_ir);
+
+  const float left_black = constrain(
+      (left_value - LEFT_BLACK_THRESHOLD) /
+          static_cast<float>(LEFT_BLACK_MAX - LEFT_BLACK_THRESHOLD),
+      0.0f,
+      1.0f);
+
+  const float middle_black = constrain(
+      (middle_value - MIDDLE_BLACK_THRESHOLD) /
+          static_cast<float>(MIDDLE_BLACK_MAX - MIDDLE_BLACK_THRESHOLD),
+      0.0f,
+      1.0f);
+
+  const float right_black = constrain(
+      (right_value - RIGHT_BLACK_THRESHOLD) /
+          static_cast<float>(RIGHT_BLACK_MAX - RIGHT_BLACK_THRESHOLD),
+      0.0f,
+      1.0f);
+
+  return left_black >= TRIPLE_BLACK_LEVEL &&
+         middle_black >= TRIPLE_BLACK_LEVEL &&
+         right_black >= TRIPLE_BLACK_LEVEL;
 }
