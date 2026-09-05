@@ -1,10 +1,20 @@
 #include <Arduino.h>
 
-constexpr int BLACK_THRESHOLD = 100;  // Ignore readings at or below this
-constexpr int BLACK_MAX_VALUE = 2000; // Measure your darkest reading; start with 1000
+// Per-sensor calibration values measured on this robot.
+constexpr int LEFT_BLACK_THRESHOLD = 75;
+constexpr int MIDDLE_BLACK_THRESHOLD = 45;
+constexpr int RIGHT_BLACK_THRESHOLD = 70;
+
+constexpr int LEFT_BLACK_MAX = 2400;
+constexpr int MIDDLE_BLACK_MAX = 1780;
+constexpr int RIGHT_BLACK_MAX = 1630;
 constexpr int MAX_PWM = 80;
 constexpr int MAX_DRIVE_PWM = 80; // Increase gradually after tuning
 constexpr int DEADBAND = 0;
+constexpr uint32_t PWM_FREQUENCY = 20000;
+constexpr uint8_t PWM_RESOLUTION = 8;
+constexpr uint8_t LEFT_PWM_CHANNEL = 0;
+constexpr uint8_t RIGHT_PWM_CHANNEL = 1;
 
 const int turning_speed = 50;
 const int straight_speed = 50;
@@ -25,6 +35,7 @@ void pid_drive();
 int calculate_pid_speed(int sensor_pin);
 void drive_motors(int left_vel, int right_vel);
 bool check_black(int sensor_pin);
+int black_threshold_for(int sensor_pin);
 void end_zone();
 void stop();
 
@@ -39,11 +50,18 @@ void setup()
   pinMode(right_motorB, OUTPUT);
   pinMode(left_pwm, OUTPUT);
   pinMode(right_pwm, OUTPUT);
-  Serial.begin(9600);
+
+  // Explicitly attach the motor-enable pins to ESP32 LEDC PWM outputs.
+  ledcSetup(LEFT_PWM_CHANNEL, PWM_FREQUENCY, PWM_RESOLUTION);
+  ledcSetup(RIGHT_PWM_CHANNEL, PWM_FREQUENCY, PWM_RESOLUTION);
+  ledcAttachPin(left_pwm, LEFT_PWM_CHANNEL);
+  ledcAttachPin(right_pwm, RIGHT_PWM_CHANNEL);
+  // Serial.begin(9600);
 }
 
 void loop()
 {
+  // drive_motors(50, 50);
   determine_drive_mode();
 }
 
@@ -54,20 +72,10 @@ int determine_drive_mode()
 
     if (check_black(left_ir) && check_black(right_ir))
     {
-      // If all sensors detect black, check if we are in the end zone
-      drive_motors(straight_speed, straight_speed);
-      delay(50); // Drive straight a little
-      if (check_black(left_ir) && check_black(middle_ir) && check_black(right_ir))
-      {
-        end_zone();
-        return 10; // End zone
-      }
-      else
-      {
-        // If not in the end zone, we are in the capacitor zone, drive straight
-        capacitor_zone = true;
-        return 11; // Found capacitor zone
-      }
+      // A wide line or intersection can cover all three sensors; keep tracking.
+      capacitor_zone = false;
+      pid_drive();
+      return 1;
     }
     else
     {
@@ -106,7 +114,9 @@ int determine_drive_mode()
     {
       // If we are in the capacitor zone, drive straight
       drive_motors(straight_speed, straight_speed); // Drive straight
-      while (!check_black(left_ir) || !check_black(middle_ir || !check_black(right_ir)))
+      while (!check_black(left_ir) &&
+             !check_black(middle_ir) &&
+             !check_black(right_ir))
       {
         delay(10);
       }
@@ -117,7 +127,7 @@ int determine_drive_mode()
     {
       // Spin to search for the line
       // drive_motors(turning_speed, -turning_speed); // Spin in place
-      Serial.print("\nSearching for line");
+      // Serial.print("\nSearching for line");
       pid_drive();
       // TODO: add some kind of counter to track when lost. line
       return 0; // Search mode
@@ -146,19 +156,25 @@ void pid_drive()
   //   return;
   // }
 
-  const int sensor_range = BLACK_MAX_VALUE - BLACK_THRESHOLD;
+  const int left_sensor_range = LEFT_BLACK_MAX - LEFT_BLACK_THRESHOLD;
+  const int right_sensor_range = RIGHT_BLACK_MAX - RIGHT_BLACK_THRESHOLD;
   const int max_correction = 50;
 
   const int left_error = constrain(
-      left_value - BLACK_THRESHOLD, 0, sensor_range);
+      left_value - LEFT_BLACK_THRESHOLD, 0, left_sensor_range);
 
   const int right_error = constrain(
-      right_value - BLACK_THRESHOLD, 0, sensor_range);
+      right_value - RIGHT_BLACK_THRESHOLD, 0, right_sensor_range);
+
+  const float left_black =
+      left_error / static_cast<float>(left_sensor_range);
+  const float right_black =
+      right_error / static_cast<float>(right_sensor_range);
 
   // Left black -> negative correction -> left slows, right speeds up.
   // Right black -> positive correction -> left speeds up, right slows.
-  const int correction =
-      ((right_error - left_error) * max_correction) / sensor_range;
+  const int correction = static_cast<int>(
+      (right_black - left_black) * max_correction);
 
   const int left_speed = constrain(
       straight_speed + correction, 0, MAX_PWM);
@@ -167,10 +183,10 @@ void pid_drive()
       straight_speed - correction, 0, MAX_PWM);
 
   drive_motors(left_speed, right_speed);
-  Serial.print("\nLeft speed: ");
-  Serial.print(left_speed);
-  Serial.print(" | Right speed: ");
-  Serial.println(right_speed);
+  // Serial.print("\nLeft speed: ");
+  // Serial.print(left_speed);
+  // Serial.print(" | Right speed: ");
+  // Serial.println(right_speed);
 }
 
 // int calculate_pid_speed(int sensor_pin)
@@ -225,7 +241,9 @@ void set_motor(int pwm_pin, int direction_pin_1, int direction_pin_2, int veloci
     digitalWrite(direction_pin_2, LOW);
   }
 
-  analogWrite(pwm_pin, pwm);
+  const uint8_t pwm_channel =
+      (pwm_pin == left_pwm) ? LEFT_PWM_CHANNEL : RIGHT_PWM_CHANNEL;
+  ledcWrite(pwm_channel, pwm);
 }
 
 void drive_motors(int left_vel, int right_vel)
@@ -237,7 +255,22 @@ void drive_motors(int left_vel, int right_vel)
 bool check_black(int sensor_pin)
 {
   int sensor_value = analogRead(sensor_pin);
-  return sensor_value > BLACK_THRESHOLD; // Returns true if the sensor detects black
+  return sensor_value > black_threshold_for(sensor_pin);
+}
+
+int black_threshold_for(int sensor_pin)
+{
+  if (sensor_pin == left_ir)
+  {
+    return LEFT_BLACK_THRESHOLD;
+  }
+
+  if (sensor_pin == middle_ir)
+  {
+    return MIDDLE_BLACK_THRESHOLD;
+  }
+
+  return RIGHT_BLACK_THRESHOLD;
 }
 
 void end_zone()
