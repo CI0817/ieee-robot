@@ -8,17 +8,17 @@ constexpr float TRIPLE_TURN_SCALE = 3.0f;
 int last_left_speed = 0;
 int last_right_speed = 0;
 
-constexpr float TRIPLE_BLACK_SPEED_SCALE = 0.40f;
+constexpr float TRIPLE_BLACK_SPEED_SCALE = 0.20f;
 // Fraction of each calibrated black range required to count as “detected.”
 constexpr float DETECT_BLACK_LEVEL = 0.15f;
 
 int last_heading_left_speed = 100;
 int last_heading_right_speed = 100;
 
-constexpr float KP = 55.0f;
+constexpr float KP = 65.0f;
 constexpr float KD = 7.0f;
 constexpr float MAX_CORRECTION = 60.0f;
-constexpr float CENTER_DEADBAND = 0.04f;
+constexpr float CENTER_DEADBAND = 0.03f;
 
 // Per-sensor calibration values measured on this robot.
 // constexpr int LEFT_BLACK_THRESHOLD = 75;
