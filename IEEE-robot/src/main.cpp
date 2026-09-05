@@ -1,13 +1,17 @@
 #include <Arduino.h>
 
 // Per-sensor calibration values measured on this robot.
-constexpr int LEFT_BLACK_THRESHOLD = 75;
-constexpr int MIDDLE_BLACK_THRESHOLD = 45;
-constexpr int RIGHT_BLACK_THRESHOLD = 70;
+// constexpr int LEFT_BLACK_THRESHOLD = 75;
+// constexpr int MIDDLE_BLACK_THRESHOLD = 45;
+// constexpr int RIGHT_BLACK_THRESHOLD = 70;
 
-constexpr int LEFT_BLACK_MAX = 2400;
-constexpr int MIDDLE_BLACK_MAX = 1780;
-constexpr int RIGHT_BLACK_MAX = 1630;
+constexpr int LEFT_BLACK_THRESHOLD = 40;
+constexpr int MIDDLE_BLACK_THRESHOLD = 40;
+constexpr int RIGHT_BLACK_THRESHOLD = 40;
+
+constexpr int LEFT_BLACK_MAX = 2490;
+constexpr int MIDDLE_BLACK_MAX = 1810;
+constexpr int RIGHT_BLACK_MAX = 1620;
 constexpr int MAX_PWM = 160;
 constexpr int MAX_DRIVE_PWM = 160; // Increase gradually after tuning
 constexpr int DEADBAND = 0;
@@ -128,7 +132,7 @@ int determine_drive_mode()
       // Spin to search for the line
       // drive_motors(turning_speed, -turning_speed); // Spin in place
       // Serial.print("\nSearching for line");
-      pid_drive();
+      // pid_drive();
       // TODO: add some kind of counter to track when lost. line
       return 0; // Search mode
     }
