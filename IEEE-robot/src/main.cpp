@@ -4,11 +4,17 @@
 constexpr float PIVOT_BLACK_LEVEL = 0.90f;
 constexpr float PIVOT_OTHER_SIDE_MAX = 0.10f;
 constexpr float TRIPLE_TURN_SCALE = 3.0f;
+// Corner samples can enter the three-sensor region before every sensor reaches
+// a very high value. Use a moderate calibrated level, then require a recent
+// non-straight heading to reject triple-black obstacles.
+constexpr float TRIPLE_BLACK_LEVEL = 0.30f;
+constexpr int MIN_TRIPLE_HEADING_DIFFERENCE = 20;
 
 int last_left_speed = 0;
 int last_right_speed = 0;
 
-constexpr float TRIPLE_BLACK_SPEED_SCALE = 0.20f;
+constexpr float TRIPLE_BLACK_SPEED_SCALE = 0.35f;
+constexpr int MIN_TRIPLE_MOVING_PWM = 40;
 constexpr float WHITE_GAP_SPEED_SCALE = 0.40f;
 constexpr int WHITE_GAP_MAX_READING = 35;
 // Fraction of each calibrated black range required to count as “detected.”
@@ -67,6 +73,7 @@ int calculate_pid_speed(int sensor_pin);
 void drive_motors(int left_vel, int right_vel);
 bool check_black(int sensor_pin);
 int black_threshold_for(int sensor_pin);
+int apply_minimum_triple_pwm(int velocity);
 void end_zone();
 void stop();
 
@@ -111,6 +118,31 @@ int determine_drive_mode()
       middle_value <= WHITE_GAP_MAX_READING &&
       right_value <= WHITE_GAP_MAX_READING;
 
+  const float left_strength = constrain(
+      (left_value - LEFT_BLACK_THRESHOLD) /
+          static_cast<float>(LEFT_BLACK_MAX - LEFT_BLACK_THRESHOLD),
+      0.0f,
+      1.0f);
+
+  const float middle_strength = constrain(
+      (middle_value - MIDDLE_BLACK_THRESHOLD) /
+          static_cast<float>(MIDDLE_BLACK_MAX - MIDDLE_BLACK_THRESHOLD),
+      0.0f,
+      1.0f);
+
+  const float right_strength = constrain(
+      (right_value - RIGHT_BLACK_THRESHOLD) /
+          static_cast<float>(RIGHT_BLACK_MAX - RIGHT_BLACK_THRESHOLD),
+      0.0f,
+      1.0f);
+
+  const bool strong_triple_black =
+      left_strength >= TRIPLE_BLACK_LEVEL &&
+      middle_strength >= TRIPLE_BLACK_LEVEL &&
+      right_strength >= TRIPLE_BLACK_LEVEL &&
+      abs(last_heading_left_speed - last_heading_right_speed) >=
+          MIN_TRIPLE_HEADING_DIFFERENCE;
+
   if (!all_very_white)
   {
     white_gap_active = false;
@@ -118,7 +150,7 @@ int determine_drive_mode()
 
   // Triple black: preserve the previous PD heading, but travel slowly
   // until the robot leaves this wide black region.
-  if (left_black && middle_black && right_black)
+  if (strong_triple_black)
   {
     // Separate the previous heading into forward motion and turn amount.
     const float heading_forward =
@@ -142,7 +174,9 @@ int determine_drive_mode()
         -MAX_PWM,
         MAX_PWM);
 
-    drive_motors(slow_left_speed, slow_right_speed);
+    drive_motors(
+        apply_minimum_triple_pwm(slow_left_speed),
+        apply_minimum_triple_pwm(slow_right_speed));
     return 6;
   }
 
@@ -381,6 +415,21 @@ int black_threshold_for(int sensor_pin)
   return RIGHT_BLACK_THRESHOLD + static_cast<int>(
       (RIGHT_BLACK_MAX - RIGHT_BLACK_THRESHOLD) *
       DETECT_BLACK_LEVEL);
+}
+
+int apply_minimum_triple_pwm(int velocity)
+{
+  if (velocity > 0 && velocity < MIN_TRIPLE_MOVING_PWM)
+  {
+    return MIN_TRIPLE_MOVING_PWM;
+  }
+
+  if (velocity < 0 && velocity > -MIN_TRIPLE_MOVING_PWM)
+  {
+    return -MIN_TRIPLE_MOVING_PWM;
+  }
+
+  return velocity;
 }
 
 void end_zone()
