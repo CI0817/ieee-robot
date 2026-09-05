@@ -58,26 +58,18 @@ const int left_pwm = 21;
 const int right_pwm = 16;
 bool capacitor_zone = false;
 
-// End-zone detection. There's no special marker line - the track's normal
-// line simply ends, leaving a stretch of genuine white with nothing beyond
-// it but the end zone. So: once the line disappears into real white, watch
-// for what comes next. If solid black follows and it sustains (the wide end
-// zone, not just a corner glancing across all three sensors), that's it.
-// Track resuming as an ordinary 1-2 sensor line (a normal dashed-line gap)
-// or nothing showing up before the timeout means it wasn't the end zone.
-constexpr uint32_t END_ZONE_GAP_MAX_MS = 600;
-constexpr uint32_t END_ZONE_BLACK_CONFIRM_MS = 250;
+// End-zone detection: the end zone is just a solid black area the robot
+// drives into and stays on. If all three sensors read black continuously for
+// long enough, that's it - nothing else on the normal track (corners,
+// intersections, dashed-line gaps) stays solid black for anywhere near this
+// long. A brief dropout (a seam, a scuff, a wheel bump) within the run
+// doesn't reset the clock, since that already once cost us a real detection.
+constexpr uint32_t END_ZONE_BLACK_CONFIRM_MS = 2000;
+constexpr uint32_t END_ZONE_BLACK_DROPOUT_TOLERANCE_MS = 150;
 
-enum class EndZoneState : uint8_t
-{
-  FOLLOWING_LINE,
-  GAP,
-  CONFIRMING_ZONE,
-  IN_END_ZONE,
-};
-
-EndZoneState end_zone_state = EndZoneState::FOLLOWING_LINE;
-uint32_t end_zone_state_started_ms = 0;
+bool in_end_zone = false;
+uint32_t black_run_started_ms = 0; // 0 = no run currently in progress
+uint32_t last_all_black_ms = 0;
 
 int determine_drive_mode();
 void pid_drive();
@@ -87,10 +79,7 @@ bool check_black(int sensor_pin);
 int black_threshold_for(int sensor_pin);
 void end_zone();
 void stop();
-bool update_end_zone_detector(bool left_black, bool middle_black,
-                              bool right_black, bool all_very_white);
-const char *end_zone_state_name(EndZoneState state);
-void set_end_zone_state(EndZoneState new_state, uint32_t now_ms);
+bool update_end_zone_detector(bool all_black);
 
 void setup()
 {
@@ -115,7 +104,7 @@ void setup()
 
 void loop()
 {
-  if (end_zone_state == EndZoneState::IN_END_ZONE)
+  if (in_end_zone)
   {
     const BallRetrieveCommand command = update_ball_retrieval();
     drive_motors(command.left_speed, command.right_speed);
@@ -140,11 +129,10 @@ int determine_drive_mode()
       middle_value <= WHITE_GAP_MAX_READING &&
       right_value <= WHITE_GAP_MAX_READING;
 
-  // This only takes control after the complete marker, gap, and sustained
-  // black-zone sequence has been observed. Until then, normal driving below
-  // receives exactly the same sensor readings and motor commands as before.
-  if (update_end_zone_detector(left_black, middle_black, right_black,
-                                all_very_white))
+  // This only takes control once the sensors have read solid black for the
+  // full confirm duration. Until then, normal driving below receives exactly
+  // the same sensor readings and motor commands as before.
+  if (update_end_zone_detector(left_black && middle_black && right_black))
   {
     return 8;
   }
@@ -392,91 +380,43 @@ void end_zone()
   begin_ball_retrieval();
 }
 
-const char *end_zone_state_name(EndZoneState state)
+bool update_end_zone_detector(bool all_black)
 {
-  switch (state)
+  if (in_end_zone)
   {
-  case EndZoneState::FOLLOWING_LINE:
-    return "FOLLOWING_LINE";
-  case EndZoneState::GAP:
-    return "GAP";
-  case EndZoneState::CONFIRMING_ZONE:
-    return "CONFIRMING_ZONE";
-  case EndZoneState::IN_END_ZONE:
-    return "IN_END_ZONE";
-  }
-  return "UNKNOWN";
-}
-
-void set_end_zone_state(EndZoneState new_state, uint32_t now_ms)
-{
-  if (new_state != end_zone_state)
-  {
-    Serial.print("[EndZone] ");
-    Serial.print(end_zone_state_name(end_zone_state));
-    Serial.print(" -> ");
-    Serial.println(end_zone_state_name(new_state));
-  }
-
-  end_zone_state = new_state;
-  end_zone_state_started_ms = now_ms;
-}
-
-bool update_end_zone_detector(bool left_black, bool middle_black,
-                              bool right_black, bool all_very_white)
-{
-  const bool all_black = left_black && middle_black && right_black;
-  const uint32_t now_ms = millis();
-
-  switch (end_zone_state)
-  {
-  case EndZoneState::FOLLOWING_LINE:
-    if (all_very_white)
-    {
-      // The line has stopped. This might be the gap right before the end
-      // zone, or it might just be a normal dashed-line gap - CONFIRMING_ZONE
-      // below is what actually tells the two apart.
-      set_end_zone_state(EndZoneState::GAP, now_ms);
-    }
-    break;
-
-  case EndZoneState::GAP:
-    if (all_black)
-    {
-      set_end_zone_state(EndZoneState::CONFIRMING_ZONE, now_ms);
-      break;
-    }
-
-    // Keep waiting through ambiguous or still-white readings; only give up
-    // once nothing resolves into black within the timeout (the line simply
-    // resumed as normal 1-2 sensor tracking, i.e. an ordinary gap).
-    if (now_ms - end_zone_state_started_ms > END_ZONE_GAP_MAX_MS)
-    {
-      set_end_zone_state(EndZoneState::FOLLOWING_LINE, now_ms);
-    }
-    break;
-
-  case EndZoneState::CONFIRMING_ZONE:
-    if (!all_black)
-    {
-      // A short black segment after the gap was not the end zone.
-      set_end_zone_state(EndZoneState::FOLLOWING_LINE, now_ms);
-      break;
-    }
-
-    if (now_ms - end_zone_state_started_ms >= END_ZONE_BLACK_CONFIRM_MS)
-    {
-      set_end_zone_state(EndZoneState::IN_END_ZONE, now_ms);
-      end_zone();
-    }
-    break;
-
-  case EndZoneState::IN_END_ZONE:
     // Latch the state: line following must not resume during ball capture.
     return true;
   }
 
-  return end_zone_state == EndZoneState::IN_END_ZONE;
+  const uint32_t now_ms = millis();
+
+  if (all_black)
+  {
+    if (black_run_started_ms == 0)
+    {
+      black_run_started_ms = now_ms;
+      Serial.println("[EndZone] triple-black run started");
+    }
+    last_all_black_ms = now_ms;
+
+    if (now_ms - black_run_started_ms >= END_ZONE_BLACK_CONFIRM_MS)
+    {
+      Serial.println("[EndZone] sustained triple-black confirmed -> end zone");
+      in_end_zone = true;
+      end_zone();
+      return true;
+    }
+  }
+  else if (black_run_started_ms != 0 &&
+           now_ms - last_all_black_ms > END_ZONE_BLACK_DROPOUT_TOLERANCE_MS)
+  {
+    // The run genuinely ended (not just a momentary dropout) before reaching
+    // the confirm duration - this wasn't the end zone.
+    Serial.println("[EndZone] triple-black run ended before confirm threshold");
+    black_run_started_ms = 0;
+  }
+
+  return false;
 }
 
 void stop()
