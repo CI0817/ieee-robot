@@ -1,4 +1,12 @@
 #include <Arduino.h>
+#include "BluetoothSerial.h"
+
+// Classic Bluetooth SPP -- shows up as a virtual serial port once paired,
+// so telemetry works untethered. Built into the ESP32, no extra hardware.
+// If this fails to compile with a "Bluetooth is not enabled" error, the
+// Arduino-ESP32 core build in use has BT disabled at the sdkconfig level --
+// not expected on a stock esp32dev board/core, but worth knowing why.
+BluetoothSerial SerialBT;
 
 // Per-sensor calibration values measured on this robot.
 constexpr int LEFT_BLACK_THRESHOLD = 330;
@@ -9,8 +17,6 @@ constexpr int LEFT_BLACK_MAX = 620;
 constexpr int MIDDLE_BLACK_MAX = 105;
 constexpr int RIGHT_BLACK_MAX = 520;
 constexpr int MAX_PWM = 160;
-constexpr int MAX_DRIVE_PWM = 160; // Increase gradually after tuning
-constexpr int DEADBAND = 0;
 constexpr uint32_t PWM_FREQUENCY = 20000;
 constexpr uint8_t PWM_RESOLUTION = 8;
 constexpr uint8_t LEFT_PWM_CHANNEL = 0;
@@ -28,15 +34,67 @@ constexpr uint8_t RIGHT_PWM_CHANNEL = 1;
 constexpr float PIVOT_ENTER_BLACK = 0.55f;
 constexpr float PIVOT_ENTER_CLEAR = 0.10f;
 constexpr float PIVOT_EXIT_BLACK = 0.35f;
-constexpr int PIVOT_DEBOUNCE_TICKS = 3;
+// Raised from 3 -> 15 (~60ms -> ~300ms of required sustained saturation).
+// A gentle curve can briefly saturate an outer sensor to 1.0 too (confirmed
+// in testing), so blackness *level* alone can't tell a curve from a sharp
+// corner -- only a real corner sustains it this long. Retune once tested
+// against an actual sharp corner: if real corners now feel slow to trigger,
+// lower this; if curves still trip pivot, raise it further.
+constexpr int PIVOT_DEBOUNCE_TICKS = 15;
+
+// PID steering gains, applied to line_error, a weighted centroid across all
+// three sensors (range -1..1; positive means the line is toward the right
+// sensor). Using all three -- not just outer-sensor difference -- matters
+// because the outer sensors are near-binary (see MAX_SPEED_STEP_PER_TICK
+// comment below): on a gentle curve the line sits under the middle sensor
+// most of the time, and a left/right-only error is pinned at 0 there,
+// producing a straight-then-snap-correct hunt instead of a smooth arc.
+// KD is new -- previously P-only, deliberately deferred until the pivot
+// override above was validated against a real corner. Starting guess only,
+// re-tune alongside the pivot constants once on hardware: too much KD will
+// amplify sensor noise into visible wheel jitter on straight sections.
+constexpr float LINE_KP = 80.0f;
+constexpr float LINE_KD = 0.0f; // zeroed for KP-only / pivot tuning pass -- see chat
+
+// Fixed control-loop cadence. Without this, loop() runs as fast as the MCU
+// can execute it (sub-millisecond), which makes dt in the D-term tiny and
+// noisy -- (line_error - prev_line_error) divided by a near-zero dt turns
+// ordinary ADC noise into huge derivative spikes every tick (the "very very
+// jittery" symptom). It also makes PIVOT_DEBOUNCE_TICKS represent a real
+// ~60ms window instead of however fast the raw loop happens to spin.
+constexpr unsigned long CONTROL_INTERVAL_MS = 20;
+
+// Flip off once KP/KD are settled -- see the throttled print at the end of
+// pid_drive() for why this shouldn't just be left on permanently.
+constexpr bool ENABLE_TUNING_TELEMETRY = true;
+
+// Slew-rate limit: max change in a wheel's commanded speed per control
+// tick, applied in drive_motors() so it smooths every path uniformly (P/D
+// corrections, pivot entry/exit, gap-hold). Outer IR sensors appear to have
+// a near-binary black/white response (jump from ~0 to full saturation over
+// a tiny physical offset -- confirmed by hunting that persisted even after
+// lowering straight_speed), so the *input* signal itself is step-like no
+// matter how KP/KD/speed are tuned. This smooths the *output* instead:
+// turns a sudden correction jump into a fast ramp. Starting guess -- retune
+// alongside everything else; too low will feel sluggish into real corners.
+// Lowered from 40 -> 8: at 40/tick (20ms tick), a full ~80-unit correction
+// swing completed in 2 ticks = 40ms -- basically instantaneous to the eye,
+// so it wasn't actually producing a perceptible ramp. At 8/tick the same
+// swing takes ~10 ticks = ~200ms, which should actually read as smooth.
+constexpr int MAX_SPEED_STEP_PER_TICK = 8;
 
 // Safety cutoff: if no sensor has seen black for this long, stop instead of
 // coasting on a held command forever (e.g. a stale pivot command with no
 // line in sight would otherwise spin in place indefinitely).
-constexpr unsigned long MAX_BLIND_MS = 500;
+// TEMPORARY: bumped to 5s to unblock testing dash gaps (up to 5cm) without
+// measuring real cruise speed yet. At 5s, a genuine line loss (missed a
+// corner, drove off-track) coasts blind for a long real distance before
+// stopping -- replace with a properly measured value (gap_length / speed,
+// with margin) before any real practice/competition run.
+constexpr unsigned long MAX_BLIND_MS = 5000;
 
 const int turning_speed = 100;
-const int straight_speed = 100;
+const int straight_speed = 90; // lowered from 100 to test the hunting-on-curves hypothesis -- see chat
 
 const int left_ir = 32;
 const int middle_ir = 35;
@@ -71,9 +129,16 @@ int pivot_candidate_ticks = 0;
 bool line_was_visible = true;
 unsigned long line_lost_since_ms = 0;
 
+// D-term state, persisted across pid_drive() calls. dt is measured from
+// wall-clock time (not assumed constant per loop) so the derivative stays
+// correct across a pivot-mode detour or a brief line-loss coast, both of
+// which skip line_error updates for a while without calling pid_drive.
+float prev_line_error = 0.0f;
+unsigned long prev_error_ms = 0;
+bool have_prev_error = false;
+
 int determine_drive_mode();
 void pid_drive();
-int calculate_pid_speed(int sensor_pin);
 void drive_motors(int left_vel, int right_vel);
 bool check_black(int sensor_pin);
 int black_threshold_for(int sensor_pin);
@@ -98,11 +163,23 @@ void setup()
   ledcAttachPin(left_pwm, LEFT_PWM_CHANNEL);
   ledcAttachPin(right_pwm, RIGHT_PWM_CHANNEL);
   Serial.begin(9600);
+  SerialBT.begin("IEEE-Robot"); // device name shown when pairing/scanning
 }
 
 void loop()
 {
   // drive_motors(50, 50);
+
+  // Gate the control loop to a fixed cadence -- see CONTROL_INTERVAL_MS
+  // above for why this matters for the D-term and the pivot debounce.
+  static unsigned long last_tick_ms = 0;
+  const unsigned long now_ms = millis();
+  if (now_ms - last_tick_ms < CONTROL_INTERVAL_MS)
+  {
+    return;
+  }
+  last_tick_ms = now_ms;
+
   determine_drive_mode();
 }
 
@@ -161,21 +238,34 @@ void pid_drive()
   // Serial.print("\nPID Mode");
   capacitor_zone = false;
 
+  // Shared by both the pivot and P/D telemetry prints below, so pivot mode
+  // (which used to return before ever reaching a print) is now visible too.
+  const unsigned long now_ms = millis();
+  static unsigned long last_print_ms = 0;
+  const bool should_print =
+      ENABLE_TUNING_TELEMETRY && (now_ms - last_print_ms >= 100);
+
   const int left_value = analogRead(left_ir);
+  const int middle_value = analogRead(middle_ir);
   const int right_value = analogRead(right_ir);
 
   const int left_sensor_range = LEFT_BLACK_MAX - LEFT_BLACK_THRESHOLD;
+  const int middle_sensor_range = MIDDLE_BLACK_MAX - MIDDLE_BLACK_THRESHOLD;
   const int right_sensor_range = RIGHT_BLACK_MAX - RIGHT_BLACK_THRESHOLD;
-  const int max_correction = 80;
 
   const int left_error = constrain(
       left_value - LEFT_BLACK_THRESHOLD, 0, left_sensor_range);
+
+  const int middle_error = constrain(
+      middle_value - MIDDLE_BLACK_THRESHOLD, 0, middle_sensor_range);
 
   const int right_error = constrain(
       right_value - RIGHT_BLACK_THRESHOLD, 0, right_sensor_range);
 
   const float left_black =
       left_error / static_cast<float>(left_sensor_range);
+  const float middle_black =
+      middle_error / static_cast<float>(middle_sensor_range);
   const float right_black =
       right_error / static_cast<float>(right_sensor_range);
 
@@ -223,21 +313,65 @@ void pid_drive()
 
   if (pivot_state != 0)
   {
+    // True point-turn: both wheels drive, opposite directions, instead of
+    // reversing one wheel while parking the other. The parked-wheel version
+    // only had one motor's worth of angular authority, which on a sharp
+    // corner could be too slow to sweep the sensor array back onto the line
+    // before MAX_BLIND_MS gives up and stops -- looking like the robot
+    // freezing mid-turn. This roughly doubles turn rate for the same
+    // turning_speed; re-check turning_speed once this lands on hardware,
+    // since a faster pivot may now want a lower speed to avoid overshoot.
     if (pivot_state < 0)
     {
-      drive_motors(-turning_speed, 0);
+      drive_motors(-turning_speed, turning_speed);
     }
     else
     {
-      drive_motors(0, -turning_speed);
+      drive_motors(turning_speed, -turning_speed);
+    }
+
+    if (should_print)
+    {
+      last_print_ms = now_ms;
+      char buf[80];
+      // L/R here are last_left_speed/last_right_speed, i.e. the actual
+      // post-slew-limit speed drive_motors() just applied, not the raw
+      // pivot target -- so this matches what the motors really did.
+      snprintf(buf, sizeof(buf), "PIVOT side=%d L_blk=%.3f R_blk=%.3f L=%d R=%d",
+               pivot_state, left_black, right_black, last_left_speed, last_right_speed);
+      Serial.println(buf);
+      SerialBT.println(buf);
     }
     return;
   }
 
-  // Left black -> negative correction -> left slows, right speeds up.
-  // Right black -> positive correction -> left speeds up, right slows.
+  // Weighted centroid across all three sensors, at positions -1 (left), 0
+  // (middle), +1 (right), normalized by total activation. The middle term
+  // drops out of the numerator (weight 0) but still counts in the
+  // denominator, so a line sitting mostly under the middle sensor pulls the
+  // magnitude of line_error toward 0 (correctly reads as centered) instead
+  // of being ignored outright -- see the LINE_KP comment above for why
+  // outer-sensor-only difference couldn't do this.
+  // Left black -> negative error -> left slows, right speeds up.
+  // Right black -> positive error -> left speeds up, right slows.
+  const float total_black = left_black + middle_black + right_black;
+  const float line_error = (total_black > 0.05f)
+                                ? (right_black - left_black) / total_black
+                                : (right_black - left_black);
+
+  const float dt = have_prev_error
+                        ? (now_ms - prev_error_ms) / 1000.0f
+                        : 0.0f;
+  const float derivative = (dt > 0.0f)
+                                ? (line_error - prev_line_error) / dt
+                                : 0.0f;
+
   const int correction = static_cast<int>(
-      (right_black - left_black) * max_correction);
+      line_error * LINE_KP + derivative * LINE_KD);
+
+  prev_line_error = line_error;
+  prev_error_ms = now_ms;
+  have_prev_error = true;
 
   const int left_speed = constrain(
       straight_speed + correction, -MAX_PWM, MAX_PWM);
@@ -246,40 +380,24 @@ void pid_drive()
       straight_speed - correction, -MAX_PWM, MAX_PWM);
 
   drive_motors(left_speed, right_speed);
-  // Serial.print("\nLeft speed: ");
-  // Serial.print(left_speed);
-  // Serial.print(" | Right speed: ");
-  // Serial.println(right_speed);
+
+  // Throttled: printing every loop tick at 9600 baud would block long
+  // enough to distort the dt the D-term relies on. Flip
+  // ENABLE_TUNING_TELEMETRY off once KP/KD are settled -- this is a
+  // tuning aid, not permanent logging.
+  if (should_print)
+  {
+    last_print_ms = now_ms;
+    char buf[80];
+    // L/R are last_left_speed/last_right_speed (the actual post-slew-limit
+    // speed drive_motors() just applied), not the raw left_speed/right_speed
+    // computed above -- so this matches what the motors really did.
+    snprintf(buf, sizeof(buf), "err=%.3f d=%.3f corr=%d L=%d R=%d",
+             line_error, derivative, correction, last_left_speed, last_right_speed);
+    Serial.println(buf);
+    SerialBT.println(buf);
+  }
 }
-
-// int calculate_pid_speed(int sensor_pin)
-// {
-//   const int sensor_value = analogRead(sensor_pin);
-
-//   // Always use valid, consistent PWM limits.
-//   const int cruise_speed = constrain(straight_speed, 0, MAX_PWM);
-//   const int max_speed = constrain(MAX_DRIVE_PWM, cruise_speed, MAX_PWM);
-
-//   const int error = sensor_value - BLACK_THRESHOLD;
-
-//   // White or near-black threshold: drive at the fixed cruise speed.
-//   if (error <= DEADBAND)
-//   {
-//     return cruise_speed;
-//   }
-
-//   const int limited_error = constrain(
-//       error,
-//       0,
-//       BLACK_MAX_VALUE - BLACK_THRESHOLD);
-
-//   return map(
-//       limited_error,
-//       0,
-//       BLACK_MAX_VALUE - BLACK_THRESHOLD,
-//       cruise_speed,
-//       max_speed);
-// }
 
 void set_motor(int pwm_pin, int direction_pin_1, int direction_pin_2, int velocity)
 {
@@ -318,6 +436,17 @@ void set_motor(int pwm_pin, int direction_pin_1, int direction_pin_2, int veloci
 
 void drive_motors(int left_vel, int right_vel)
 {
+  // Slew-rate limit against the last actually-applied speed -- see
+  // MAX_SPEED_STEP_PER_TICK above. A repeated call with the same value
+  // (e.g. determine_drive_mode()'s gap-hold re-issuing last_left_speed) is
+  // a no-op here since the requested change is already zero.
+  left_vel = constrain(left_vel,
+                        last_left_speed - MAX_SPEED_STEP_PER_TICK,
+                        last_left_speed + MAX_SPEED_STEP_PER_TICK);
+  right_vel = constrain(right_vel,
+                         last_right_speed - MAX_SPEED_STEP_PER_TICK,
+                         last_right_speed + MAX_SPEED_STEP_PER_TICK);
+
   last_left_speed = left_vel;
   last_right_speed = right_vel;
 
@@ -355,5 +484,11 @@ void end_zone()
 
 void stop()
 {
+  // Bypass the slew-rate limiter -- an explicit stop must be immediate,
+  // not ramped, for safety (e.g. the MAX_BLIND_MS give-up case, or later
+  // when stopping in the end box). Zeroing the reference point here means
+  // drive_motors()'s constrain() has nothing to ramp from.
+  last_left_speed = 0;
+  last_right_speed = 0;
   drive_motors(0, 0); // Stop the motors
 }
