@@ -36,7 +36,7 @@ SensorStats black_stats[SENSOR_COUNT];
 
 void setup()
 {
-  Serial.begin(9600);
+  Serial.begin(115200);
   delay(500);
   for (uint8_t i = 0; i < SENSOR_COUNT; i++)
   {
