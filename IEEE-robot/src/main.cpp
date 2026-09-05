@@ -1,4 +1,11 @@
 #include <Arduino.h>
+#include <NewPing.h>
+
+#define TRIGGER_PIN  12  // Arduino pin tied to trigger pin on the ultrasonic sensor.
+#define ECHO_PIN     11  // Arduino pin tied to echo pin on the ultrasonic sensor.
+#define MAX_DISTANCE 100 // Maximum distance we want to ping for (in centimeters). Maximum sensor distance is rated at 400-500cm.
+NewPing sonar(TRIGGER_PIN, ECHO_PIN, MAX_DISTANCE);
+
 
 // Pivot only when one side sees a very strong line and the other is mostly clear.
 constexpr float PIVOT_BLACK_LEVEL = 0.55f;
@@ -12,13 +19,13 @@ int last_right_speed = 0;
 // constexpr int MIDDLE_BLACK_THRESHOLD = 45;
 // constexpr int RIGHT_BLACK_THRESHOLD = 70;
 
-constexpr int LEFT_BLACK_THRESHOLD = 40;
-constexpr int MIDDLE_BLACK_THRESHOLD = 40;
-constexpr int RIGHT_BLACK_THRESHOLD = 40;
+constexpr int LEFT_BLACK_THRESHOLD = 55;
+constexpr int MIDDLE_BLACK_THRESHOLD = 50;
+constexpr int RIGHT_BLACK_THRESHOLD = 55;
 
-constexpr int LEFT_BLACK_MAX = 2490;
-constexpr int MIDDLE_BLACK_MAX = 1810;
-constexpr int RIGHT_BLACK_MAX = 1620;
+constexpr int LEFT_BLACK_MAX = 760;
+constexpr int MIDDLE_BLACK_MAX = 165;
+constexpr int RIGHT_BLACK_MAX = 270;
 constexpr int MAX_PWM = 160;
 constexpr int MAX_DRIVE_PWM = 160; // Increase gradually after tuning
 constexpr int DEADBAND = 0;
@@ -68,6 +75,8 @@ void setup()
   ledcAttachPin(left_pwm, LEFT_PWM_CHANNEL);
   ledcAttachPin(right_pwm, RIGHT_PWM_CHANNEL);
   // Serial.begin(9600);
+
+
 }
 
 void loop()
@@ -255,10 +264,28 @@ int black_threshold_for(int sensor_pin)
   return RIGHT_BLACK_THRESHOLD;
 }
 
+
 void end_zone()
 {
   capacitor_zone = false; // Reset capacitor zone flag
   stop();                 // Stop the motors
+
+  drive_motors(turning_speed, -turning_speed); // Pivot in place
+  delay(500); // Adjust the delay as needed for the pivot duration
+  stop(); // Stop the motors
+
+  while (sonar.ping_cm() > 20) // Adjust the distance threshold as needed
+  {
+    drive_motors(turning_speed, -turning_speed); // Pivot in place
+  }
+  stop(); // Stop the motors
+
+  while (sonar.ping_cm() > 2) // Adjust the distance threshold as needed
+  {
+    drive_motors(-straight_speed, -straight_speed); // Move forward
+  }
+  stop();
+
   // Additional logic for end zone can be added here
 }
 
