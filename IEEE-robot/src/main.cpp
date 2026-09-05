@@ -87,14 +87,22 @@ int determine_drive_mode()
   const bool middle_black = check_black(middle_ir);
   const bool right_black = check_black(right_ir);
 
-  // Any visible line: PID decides between smooth steering and pivot override.
+  // All three sensors black: likely crossing a sharp 90-degree corner.
+  // Keep the last steering command instead of recalculating a centered error.
+  if (left_black && middle_black && right_black)
+  {
+    drive_motors(last_left_speed, last_right_speed);
+    return 6; // Triple-black continuation mode
+  }
+
+  // Any other visible line pattern: use smooth PD steering.
   if (left_black || middle_black || right_black)
   {
     pid_drive();
     return 1;
   }
 
-  // No visible line: explicitly keep the most recent motor command.
+  // No line: keep the previous steering command through a gap.
   if (capacitor_zone)
   {
     drive_motors(straight_speed, straight_speed);
@@ -110,7 +118,7 @@ int determine_drive_mode()
     return 5;
   }
 
-  // drive_motors(last_left_speed, last_right_speed);
+  drive_motors(last_left_speed, last_right_speed);
   return 0;
 }
 
