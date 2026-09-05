@@ -58,25 +58,20 @@ const int left_pwm = 21;
 const int right_pwm = 16;
 bool capacitor_zone = false;
 
-// End-zone marker timing. Tune these against the robot speed and the physical
-// width of the detached entry line/gap. The expected pattern is:
-// all black (entry line) -> all white (gap) -> all black (end zone).
-//
-// ENTRY_LINE and ENTRY_GAP both tolerate readings that are neither solidly
-// black nor genuinely white for a bounded window (a real analog sensor
-// crossing a physical edge essentially never jumps cleanly between the two
-// on a single poll), only giving up once that ambiguous stretch drags on too
-// long to plausibly be part of the marker.
-constexpr uint32_t END_ZONE_ENTRY_LINE_MIN_MS = 50;
-constexpr uint32_t END_ZONE_ENTRY_LINE_MAX_MS = 300;
+// End-zone detection. There's no special marker line - the track's normal
+// line simply ends, leaving a stretch of genuine white with nothing beyond
+// it but the end zone. So: once the line disappears into real white, watch
+// for what comes next. If solid black follows and it sustains (the wide end
+// zone, not just a corner glancing across all three sensors), that's it.
+// Track resuming as an ordinary 1-2 sensor line (a normal dashed-line gap)
+// or nothing showing up before the timeout means it wasn't the end zone.
 constexpr uint32_t END_ZONE_GAP_MAX_MS = 600;
 constexpr uint32_t END_ZONE_BLACK_CONFIRM_MS = 250;
 
 enum class EndZoneState : uint8_t
 {
   FOLLOWING_LINE,
-  ENTRY_LINE,
-  ENTRY_GAP,
+  GAP,
   CONFIRMING_ZONE,
   IN_END_ZONE,
 };
@@ -403,10 +398,8 @@ const char *end_zone_state_name(EndZoneState state)
   {
   case EndZoneState::FOLLOWING_LINE:
     return "FOLLOWING_LINE";
-  case EndZoneState::ENTRY_LINE:
-    return "ENTRY_LINE";
-  case EndZoneState::ENTRY_GAP:
-    return "ENTRY_GAP";
+  case EndZoneState::GAP:
+    return "GAP";
   case EndZoneState::CONFIRMING_ZONE:
     return "CONFIRMING_ZONE";
   case EndZoneState::IN_END_ZONE:
@@ -438,54 +431,25 @@ bool update_end_zone_detector(bool left_black, bool middle_black,
   switch (end_zone_state)
   {
   case EndZoneState::FOLLOWING_LINE:
-    if (all_black)
-    {
-      set_end_zone_state(EndZoneState::ENTRY_LINE, now_ms);
-    }
-    break;
-
-  case EndZoneState::ENTRY_LINE:
-    if (all_black)
-    {
-      // Still on the entry line; keep waiting for it to end.
-      break;
-    }
-
     if (all_very_white)
     {
-      // Only treat this as the deliberate marker gap if the black line
-      // beforehand was wide enough to not be ordinary line noise/a corner.
-      if (now_ms - end_zone_state_started_ms >= END_ZONE_ENTRY_LINE_MIN_MS)
-      {
-        set_end_zone_state(EndZoneState::ENTRY_GAP, now_ms);
-      }
-      else
-      {
-        set_end_zone_state(EndZoneState::FOLLOWING_LINE, now_ms);
-      }
-      break;
-    }
-
-    // Neither solidly black nor genuinely white: almost certainly the
-    // sensor crossing the physical edge between the line and the gap, not a
-    // real transition to a new state yet. Keep waiting rather than giving up
-    // on a single ambiguous reading, but bail out if this drags on (i.e.
-    // this was never heading toward a real gap).
-    if (now_ms - end_zone_state_started_ms > END_ZONE_ENTRY_LINE_MAX_MS)
-    {
-      set_end_zone_state(EndZoneState::FOLLOWING_LINE, now_ms);
+      // The line has stopped. This might be the gap right before the end
+      // zone, or it might just be a normal dashed-line gap - CONFIRMING_ZONE
+      // below is what actually tells the two apart.
+      set_end_zone_state(EndZoneState::GAP, now_ms);
     }
     break;
 
-  case EndZoneState::ENTRY_GAP:
+  case EndZoneState::GAP:
     if (all_black)
     {
       set_end_zone_state(EndZoneState::CONFIRMING_ZONE, now_ms);
       break;
     }
 
-    // Tolerate ambiguous readings for the same reason as ENTRY_LINE; only
-    // give up once the whole gap has taken too long to resolve into black.
+    // Keep waiting through ambiguous or still-white readings; only give up
+    // once nothing resolves into black within the timeout (the line simply
+    // resumed as normal 1-2 sensor tracking, i.e. an ordinary gap).
     if (now_ms - end_zone_state_started_ms > END_ZONE_GAP_MAX_MS)
     {
       set_end_zone_state(EndZoneState::FOLLOWING_LINE, now_ms);
