@@ -16,6 +16,9 @@ constexpr uint8_t PWM_RESOLUTION = 8;
 constexpr uint8_t LEFT_PWM_CHANNEL = 0;
 constexpr uint8_t RIGHT_PWM_CHANNEL = 1;
 
+// 14 = servo sig,
+// trigger = 13, echo = 12
+
 const int turning_speed = 100;
 const int straight_speed = 100;
 
