@@ -12,7 +12,7 @@ constexpr int SEARCH_TURN_SPEED = 70;
 constexpr int SEARCH_REVERSE_SPEED = 60;
 constexpr uint32_t SEARCH_TARGET_LOST_MS = 400;
 constexpr uint32_t SEARCH_SONAR_INTERVAL_MS = 120;
-constexpr float SEARCH_DETECTION_DISTANCE_CM = 20.0f;
+constexpr float SEARCH_DETECTION_DISTANCE_CM = 25.0f;
 // Once already committed to a target, keep tracking it with a looser radius
 // than the initial detection. A narrow ultrasonic cone can drift off the ball
 // as the robot gets closer and the same aiming error becomes a bigger lateral

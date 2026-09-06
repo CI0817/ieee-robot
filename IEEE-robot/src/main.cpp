@@ -14,7 +14,7 @@ bool triple_black_is_corner = false;
 
 constexpr float TRIPLE_BLACK_SPEED_SCALE = 0.35f;
 constexpr int MIN_TRIPLE_MOVING_PWM = 40;
-constexpr float WHITE_GAP_SPEED_SCALE = 0.40f;
+constexpr float WHITE_GAP_SPEED_SCALE = 0.50f;
 constexpr int WHITE_GAP_MAX_READING = 35;
 // Fraction of each calibrated black range required to count as “detected.”
 // Deliberately lenient - this only needs to catch a thin printed line,
@@ -30,8 +30,8 @@ constexpr float DEEP_BLACK_LEVEL = 0.60f;
 
 int last_heading_left_speed = 100;
 int last_heading_right_speed = 100;
-int white_gap_left_speed = 0;
-int white_gap_right_speed = 0;
+int white_gap_left_speed = 100;
+int white_gap_right_speed = 100;
 bool white_gap_active = false;
 
 constexpr float KP = 65.0f;
@@ -390,8 +390,8 @@ int determine_drive_mode()
   // the same scaled pair preserves the curve without reducing it every loop.
   if (!white_gap_active)
   {
-    white_gap_left_speed = last_left_speed;
-    white_gap_right_speed = last_right_speed;
+    // white_gap_left_speed = last_left_speed;
+    // white_gap_right_speed = last_right_speed;
     white_gap_active = true;
   }
 
