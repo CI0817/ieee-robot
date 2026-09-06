@@ -38,13 +38,13 @@ constexpr float OUTER_CENTER_MAX = 0.08f;
 // constexpr int MIDDLE_BLACK_THRESHOLD = 45;
 // constexpr int RIGHT_BLACK_THRESHOLD = 70;
 
-constexpr int LEFT_BLACK_THRESHOLD = 45;
-constexpr int MIDDLE_BLACK_THRESHOLD = 40;
-constexpr int RIGHT_BLACK_THRESHOLD = 45;
+constexpr int LEFT_BLACK_THRESHOLD = 20;
+constexpr int MIDDLE_BLACK_THRESHOLD = 15;
+constexpr int RIGHT_BLACK_THRESHOLD = 15;
 
-constexpr int LEFT_BLACK_MAX = 760;
-constexpr int MIDDLE_BLACK_MAX = 165;
-constexpr int RIGHT_BLACK_MAX = 270;
+constexpr int LEFT_BLACK_MAX = 550;
+constexpr int MIDDLE_BLACK_MAX = 110;
+constexpr int RIGHT_BLACK_MAX = 220;
 constexpr int MAX_PWM = 250;
 // constexpr int MAX_DRIVE_PWM = 160; // Increase gradually after tuning
 constexpr int DEADBAND = 0;
@@ -91,6 +91,24 @@ uint32_t last_all_black_ms = 0;
 // rest of the run - regardless of what the sensors see afterward.
 bool ball_retrieved = false;
 
+// After retrieval, the same sustained-deep-black signature reappears once
+// when the robot makes it back to the (also solid black) start box. Tracked
+// independently from the outbound run's state above so the two can never be
+// confused with each other.
+uint32_t start_box_run_started_ms = 0;
+uint32_t last_start_box_black_ms = 0;
+
+// Detecting the start box only proves the sensors (near the front of the
+// chassis) have reached it - the rest of the robot hasn't necessarily
+// caught up yet, and the rules require the full body to stop inside. Rather
+// than guess from sensor geometry, just keep driving straight for a fixed,
+// hand-tuned duration before stopping for good. Tune this on the assembled
+// robot against the actual box size.
+constexpr uint32_t DRIVE_INTO_START_BOX_MS = 1500;
+bool driving_into_start_box = false;
+uint32_t driving_into_start_box_started_ms = 0;
+bool finished = false; // Latched once stopped in the start box; attempt over.
+
 // The start box is also a solid black square (per the ruleset, just smaller
 // than the end box), and the robot begins the run sitting in it - so a raw
 // sustained-black check alone can't tell the two apart. The track otherwise
@@ -121,6 +139,8 @@ int black_threshold_for(int sensor_pin);
 void end_zone();
 void stop();
 bool update_end_zone_detector(bool all_deep_black);
+bool detect_sustained_black(bool all_deep_black, uint32_t &run_started_ms,
+                             uint32_t &last_seen_ms);
 
 void setup()
 {
@@ -145,6 +165,26 @@ void setup()
 
 void loop()
 {
+  if (finished)
+  {
+    // Attempt is over - stay stopped forever.
+    return;
+  }
+
+  if (driving_into_start_box)
+  {
+    if (millis() - driving_into_start_box_started_ms < DRIVE_INTO_START_BOX_MS)
+    {
+      drive_motors(straight_speed, straight_speed);
+      return;
+    }
+
+    Serial.println("[StartZone] drive-in complete -> stopping, attempt finished");
+    stop();
+    finished = true;
+    return;
+  }
+
   if (exiting_end_zone)
   {
     const int left_value = analogRead(left_ir);
@@ -228,6 +268,11 @@ int determine_drive_mode()
     has_seen_white_gap = true;
   }
 
+  const bool all_deep_black =
+      left_value > black_threshold_for_level(left_ir, DEEP_BLACK_LEVEL) &&
+      middle_value > black_threshold_for_level(middle_ir, DEEP_BLACK_LEVEL) &&
+      right_value > black_threshold_for_level(right_ir, DEEP_BLACK_LEVEL);
+
   // This only takes control once the sensors have read genuinely, deeply
   // black (not merely past the lenient line-following threshold) for the
   // full confirm duration - and only once the robot has seen a genuine white
@@ -236,12 +281,23 @@ int determine_drive_mode()
   // it immediately, before ever following any line. Once a ball has been
   // retrieved, this is skipped permanently - the end zone should never be
   // looked for again for the rest of the run.
-  if (has_seen_white_gap && !ball_retrieved &&
-      update_end_zone_detector(left_value > black_threshold_for_level(left_ir, DEEP_BLACK_LEVEL) &&
-                                middle_value > black_threshold_for_level(middle_ir, DEEP_BLACK_LEVEL) &&
-                                right_value > black_threshold_for_level(right_ir, DEEP_BLACK_LEVEL)))
+  if (has_seen_white_gap && !ball_retrieved && update_end_zone_detector(all_deep_black))
   {
     return 8;
+  }
+
+  // Once retrieval is done, the only other solid black region left on the
+  // course should be the start box the robot began in - watch for the same
+  // signature reappearing and, once confirmed, drive in a bit further and
+  // stop for good.
+  if (ball_retrieved &&
+      detect_sustained_black(all_deep_black, start_box_run_started_ms,
+                              last_start_box_black_ms))
+  {
+    Serial.println("[StartZone] sustained deep black confirmed -> driving in to stop");
+    driving_into_start_box = true;
+    driving_into_start_box_started_ms = millis();
+    return 9;
   }
 
   if (!all_very_white)
@@ -490,7 +546,38 @@ void end_zone()
   begin_ball_retrieval();
 }
 
-bool update_end_zone_detector(bool all_black)
+// Has `all_deep_black` been continuously true (tolerating a brief noisy
+// dropout) for END_ZONE_BLACK_CONFIRM_MS? Callers each supply their own
+// run-state pair so independent detections (the end zone, later the start
+// box) never interfere with each other.
+bool detect_sustained_black(bool all_deep_black, uint32_t &run_started_ms,
+                             uint32_t &last_seen_ms)
+{
+  const uint32_t now_ms = millis();
+
+  if (all_deep_black)
+  {
+    if (run_started_ms == 0)
+    {
+      run_started_ms = now_ms;
+    }
+    last_seen_ms = now_ms;
+
+    return now_ms - run_started_ms >= END_ZONE_BLACK_CONFIRM_MS;
+  }
+
+  if (run_started_ms != 0 &&
+      now_ms - last_seen_ms > END_ZONE_BLACK_DROPOUT_TOLERANCE_MS)
+  {
+    // The run genuinely ended (not just a momentary dropout) before reaching
+    // the confirm duration.
+    run_started_ms = 0;
+  }
+
+  return false;
+}
+
+bool update_end_zone_detector(bool all_deep_black)
 {
   if (in_end_zone)
   {
@@ -498,32 +585,13 @@ bool update_end_zone_detector(bool all_black)
     return true;
   }
 
-  const uint32_t now_ms = millis();
-
-  if (all_black)
+  if (detect_sustained_black(all_deep_black, black_run_started_ms,
+                              last_all_black_ms))
   {
-    if (black_run_started_ms == 0)
-    {
-      black_run_started_ms = now_ms;
-      Serial.println("[EndZone] triple-black run started");
-    }
-    last_all_black_ms = now_ms;
-
-    if (now_ms - black_run_started_ms >= END_ZONE_BLACK_CONFIRM_MS)
-    {
-      Serial.println("[EndZone] sustained triple-black confirmed -> end zone");
-      in_end_zone = true;
-      end_zone();
-      return true;
-    }
-  }
-  else if (black_run_started_ms != 0 &&
-           now_ms - last_all_black_ms > END_ZONE_BLACK_DROPOUT_TOLERANCE_MS)
-  {
-    // The run genuinely ended (not just a momentary dropout) before reaching
-    // the confirm duration - this wasn't the end zone.
-    Serial.println("[EndZone] triple-black run ended before confirm threshold");
-    black_run_started_ms = 0;
+    Serial.println("[EndZone] sustained deep black confirmed -> end zone");
+    in_end_zone = true;
+    end_zone();
+    return true;
   }
 
   return false;
