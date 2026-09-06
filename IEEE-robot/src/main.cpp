@@ -91,6 +91,15 @@ uint32_t last_all_black_ms = 0;
 // rest of the run - regardless of what the sensors see afterward.
 bool ball_retrieved = false;
 
+// The start box is also a solid black square (per the ruleset, just smaller
+// than the end box), and the robot begins the run sitting in it - so a raw
+// sustained-black check alone can't tell the two apart. The track otherwise
+// only has thin line, corners, and intersections between them, so "has the
+// robot seen a genuine white gap yet" is a reliable, hardware/size-agnostic
+// proxy for "has it actually left the start box's vicinity." End-zone
+// detection stays fully disarmed until this is true.
+bool has_seen_white_gap = false;
+
 // Once ball retrieval reports done (successful capture or not - that
 // distinction isn't made yet), drive straight out. The robot starts this
 // still standing on the solid black end zone, so it must first see genuine
@@ -213,13 +222,21 @@ int determine_drive_mode()
       middle_value <= WHITE_GAP_MAX_READING &&
       right_value <= WHITE_GAP_MAX_READING;
 
+  if (all_very_white && !has_seen_white_gap)
+  {
+    Serial.println("[EndZone] first white gap seen -> end-zone detection armed");
+    has_seen_white_gap = true;
+  }
+
   // This only takes control once the sensors have read genuinely, deeply
   // black (not merely past the lenient line-following threshold) for the
-  // full confirm duration. Until then, normal driving below receives exactly
-  // the same sensor readings and motor commands as before. Once a ball has
-  // been retrieved, this is skipped permanently - the end zone should never
-  // be looked for again for the rest of the run.
-  if (!ball_retrieved &&
+  // full confirm duration - and only once the robot has seen a genuine white
+  // gap at least once. The start box is also a solid black square the robot
+  // begins the run standing in, and without that gate this would trigger on
+  // it immediately, before ever following any line. Once a ball has been
+  // retrieved, this is skipped permanently - the end zone should never be
+  // looked for again for the rest of the run.
+  if (has_seen_white_gap && !ball_retrieved &&
       update_end_zone_detector(left_value > black_threshold_for_level(left_ir, DEEP_BLACK_LEVEL) &&
                                 middle_value > black_threshold_for_level(middle_ir, DEEP_BLACK_LEVEL) &&
                                 right_value > black_threshold_for_level(right_ir, DEEP_BLACK_LEVEL)))
