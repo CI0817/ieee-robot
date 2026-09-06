@@ -122,7 +122,7 @@ uint32_t last_start_box_black_ms = 0;
 // than guess from sensor geometry, just keep driving straight for a fixed,
 // hand-tuned duration before stopping for good. Tune this on the assembled
 // robot against the actual box size.
-constexpr uint32_t DRIVE_INTO_START_BOX_MS = 2500;
+constexpr uint32_t DRIVE_INTO_START_BOX_MS = 2900;
 bool driving_into_start_box = false;
 uint32_t driving_into_start_box_started_ms = 0;
 bool finished = false; // Latched once stopped in the start box; attempt over.
