@@ -6,6 +6,17 @@ constexpr float PIVOT_BLACK_LEVEL = 0.80f;
 constexpr float PIVOT_OTHER_SIDE_MAX = 0.30f;
 constexpr float TRIPLE_TURN_SCALE = 3.0f;
 
+// After a long stretch with no sensor near the line (e.g. drifting across a
+// wide gap or rounded feature), a single outer sensor suddenly reading
+// strong black while the other outer is still clear looks identical to a
+// genuine sharp corner - but on a wide curve it's just the robot drifting
+// into the inside edge of the tape. Ignore that lone reading and keep
+// driving straight until a second sensor (middle or the other outer)
+// confirms the line is genuinely there before resuming normal steering.
+constexpr uint32_t LINE_REACQUIRE_TIMEOUT_MS = 2000;
+uint32_t last_genuine_line_ms = 0;
+bool ignoring_lone_outer_hit = false;
+
 int last_left_speed = 0;
 int last_right_speed = 0;
 int previous_black_sensor_count = 0;
@@ -439,16 +450,50 @@ void pid_drive()
       0.0f,
       1.0f);
 
+  const uint32_t now_ms = millis();
+  const bool long_time_since_line =
+      (now_ms - last_genuine_line_ms) > LINE_REACQUIRE_TIMEOUT_MS;
+
+  if (left_black > 0.0f || middle_black > 0.0f || right_black > 0.0f)
+  {
+    last_genuine_line_ms = now_ms;
+  }
+
+  const bool lone_left_hit =
+      left_black >= PIVOT_BLACK_LEVEL && right_black <= PIVOT_OTHER_SIDE_MAX;
+  const bool lone_right_hit =
+      right_black >= PIVOT_BLACK_LEVEL && left_black <= PIVOT_OTHER_SIDE_MAX;
+
+  if (!ignoring_lone_outer_hit && long_time_since_line &&
+      (lone_left_hit || lone_right_hit))
+  {
+    Serial.println("[LineFollow] lone outer hit after long white -> ignoring, reacquiring line");
+    ignoring_lone_outer_hit = true;
+  }
+
+  if (ignoring_lone_outer_hit)
+  {
+    const bool second_sensor_confirms =
+        middle_black > 0.0f || (left_black > 0.0f && right_black > 0.0f);
+
+    if (!second_sensor_confirms)
+    {
+      drive_motors(straight_speed, straight_speed);
+      return;
+    }
+
+    Serial.println("[LineFollow] second sensor confirmed -> resuming regular driving");
+    ignoring_lone_outer_hit = false;
+  }
+
   // Preserve pivoting only for an obvious sharp corner.
-  if (left_black >= PIVOT_BLACK_LEVEL &&
-      right_black <= PIVOT_OTHER_SIDE_MAX)
+  if (lone_left_hit)
   {
     drive_motors(-turning_speed / 2, turning_speed / 2);
     return;
   }
 
-  if (right_black >= PIVOT_BLACK_LEVEL &&
-      left_black <= PIVOT_OTHER_SIDE_MAX)
+  if (lone_right_hit)
   {
     drive_motors(turning_speed / 2, -turning_speed / 2);
     return;
