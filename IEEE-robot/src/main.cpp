@@ -14,8 +14,7 @@ bool triple_black_is_corner = false;
 
 constexpr float TRIPLE_BLACK_SPEED_SCALE = 0.35f;
 constexpr int MIN_TRIPLE_MOVING_PWM = 40;
-constexpr float WHITE_GAP_SPEED_SCALE = 0.40f;
-constexpr int WHITE_GAP_MAX_READING = 35;
+constexpr float WHITE_GAP_SPEED_SCALE = 0.70f; //######################################################################################################################
 // Fraction of each calibrated black range required to count as “detected.”
 // Deliberately lenient - this only needs to catch a thin printed line,
 // including its fainter edges, for ordinary line following.
@@ -28,10 +27,10 @@ constexpr float DETECT_BLACK_LEVEL = 0.15f;
 // track.
 constexpr float DEEP_BLACK_LEVEL = 0.60f;
 
-int last_heading_left_speed = 100;
+int last_heading_left_speed = 10;
 int last_heading_right_speed = 100;
-int white_gap_left_speed = 0;
-int white_gap_right_speed = 0;
+int white_gap_left_speed = 110;
+int white_gap_right_speed = 100;
 bool white_gap_active = false;
 
 constexpr float KP = 65.0f;
@@ -46,9 +45,9 @@ constexpr float OUTER_CENTER_MAX = 0.08f;
 // constexpr int MIDDLE_BLACK_THRESHOLD = 45;
 // constexpr int RIGHT_BLACK_THRESHOLD = 70;
 
-constexpr int LEFT_BLACK_THRESHOLD = 20;
-constexpr int MIDDLE_BLACK_THRESHOLD = 15;
-constexpr int RIGHT_BLACK_THRESHOLD = 10;
+constexpr int LEFT_BLACK_THRESHOLD = 30;
+constexpr int MIDDLE_BLACK_THRESHOLD = 30;
+constexpr int RIGHT_BLACK_THRESHOLD = 30;
 
 constexpr int LEFT_BLACK_MAX = 550;
 constexpr int MIDDLE_BLACK_MAX = 110;
@@ -203,9 +202,9 @@ void loop()
     if (!exit_cleared_black_zone)
     {
       const bool all_very_white =
-          left_value <= WHITE_GAP_MAX_READING &&
-          middle_value <= WHITE_GAP_MAX_READING &&
-          right_value <= WHITE_GAP_MAX_READING;
+          left_value < LEFT_BLACK_THRESHOLD &&
+          middle_value < MIDDLE_BLACK_THRESHOLD &&
+          right_value < RIGHT_BLACK_THRESHOLD;
 
       if (all_very_white)
       {
@@ -267,9 +266,9 @@ int determine_drive_mode()
   const bool right_black = right_value > black_threshold_for(right_ir);
 
   const bool all_very_white =
-      left_value <= WHITE_GAP_MAX_READING &&
-      middle_value <= WHITE_GAP_MAX_READING &&
-      right_value <= WHITE_GAP_MAX_READING;
+      left_value < LEFT_BLACK_THRESHOLD &&
+      middle_value < MIDDLE_BLACK_THRESHOLD &&
+      right_value < RIGHT_BLACK_THRESHOLD;
 
   if (all_very_white && !has_seen_white_gap)
   {
@@ -390,8 +389,8 @@ int determine_drive_mode()
   // the same scaled pair preserves the curve without reducing it every loop.
   if (!white_gap_active)
   {
-    white_gap_left_speed = last_left_speed;
-    white_gap_right_speed = last_right_speed;
+    // white_gap_left_speed = last_left_speed;
+    // white_gap_right_speed = last_right_speed;
     white_gap_active = true;
   }
 
