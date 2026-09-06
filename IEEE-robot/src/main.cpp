@@ -22,10 +22,6 @@ constexpr float DETECT_BLACK_LEVEL = 0.15f;
 // track.
 constexpr float DEEP_BLACK_LEVEL = 0.60f;
 
-int white_gap_left_speed = 0;
-int white_gap_right_speed = 0;
-bool white_gap_active = false;
-
 constexpr float KP = 65.0f;
 constexpr float KD = 7.0f;
 // Scaled with straight_speed (60 was tuned for a base speed of 100) so the
@@ -308,11 +304,6 @@ int determine_drive_mode()
     return 9;
   }
 
-  if (!all_very_white)
-  {
-    white_gap_active = false;
-  }
-
   // Any sensor on black (including all three at once, e.g. a wide corner or
   // an intersection): normal PD steering handles it directly.
   if (left_black || middle_black || right_black)
@@ -329,18 +320,11 @@ int determine_drive_mode()
     return 2;
   }
 
-  // Capture the last heading once on entry to a genuinely white gap. Replaying
-  // the same scaled pair preserves the curve without reducing it every loop.
-  if (!white_gap_active)
-  {
-    white_gap_left_speed = last_left_speed;
-    white_gap_right_speed = last_right_speed;
-    white_gap_active = true;
-  }
-
-  drive_motors(
-      static_cast<int>(white_gap_left_speed * WHITE_GAP_SPEED_SCALE),
-      static_cast<int>(white_gap_right_speed * WHITE_GAP_SPEED_SCALE));
+  // Genuine white gap: there's no line to steer against, so just drive
+  // straight through it rather than trying to preserve/extrapolate whatever
+  // heading was active right before the gap.
+  const int gap_speed = static_cast<int>(straight_speed * WHITE_GAP_SPEED_SCALE);
+  drive_motors(gap_speed, gap_speed);
   return 0;
 }
 
