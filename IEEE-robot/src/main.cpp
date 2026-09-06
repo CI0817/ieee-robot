@@ -28,7 +28,10 @@ bool white_gap_active = false;
 
 constexpr float KP = 65.0f;
 constexpr float KD = 7.0f;
-constexpr float MAX_CORRECTION = 60.0f;
+// Scaled with straight_speed (60 was tuned for a base speed of 100) so the
+// steering authority available relative to speed doesn't shrink - otherwise
+// a faster cruise takes corners "wider" than before at the same correction.
+constexpr float MAX_CORRECTION = 90.0f;
 constexpr float CENTER_DEADBAND = 0.03f;
 constexpr float MIDDLE_CENTER_LEVEL = 0.20f;
 constexpr float OUTER_CENTER_MAX = 0.08f;
@@ -53,8 +56,13 @@ constexpr uint8_t PWM_RESOLUTION = 8;
 constexpr uint8_t LEFT_PWM_CHANNEL = 0;
 constexpr uint8_t RIGHT_PWM_CHANNEL = 1;
 
-const int turning_speed = 100;
-const int straight_speed = 100;
+const int turning_speed = 150;
+const int straight_speed = 150;
+// Used only by the blind timed drives (exiting the end zone, driving into
+// the start box before stopping) - kept separate from straight_speed so
+// speeding up normal line-following doesn't also change the distance those
+// hardcoded durations (e.g. DRIVE_INTO_START_BOX_MS) actually cover.
+const int BLIND_DRIVE_SPEED = 100;
 
 const int left_ir = 32;
 const int middle_ir = 35;
@@ -175,7 +183,7 @@ void loop()
   {
     if (millis() - driving_into_start_box_started_ms < DRIVE_INTO_START_BOX_MS)
     {
-      drive_motors(straight_speed, straight_speed);
+      drive_motors(BLIND_DRIVE_SPEED, BLIND_DRIVE_SPEED);
       return;
     }
 
@@ -204,7 +212,7 @@ void loop()
         exit_cleared_black_zone = true;
       }
 
-      drive_motors(straight_speed, straight_speed);
+      drive_motors(BLIND_DRIVE_SPEED, BLIND_DRIVE_SPEED);
       return;
     }
 
@@ -224,7 +232,7 @@ void loop()
       return;
     }
 
-    drive_motors(straight_speed, straight_speed);
+    drive_motors(BLIND_DRIVE_SPEED, BLIND_DRIVE_SPEED);
     return;
   }
 
