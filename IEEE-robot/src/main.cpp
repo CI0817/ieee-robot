@@ -40,6 +40,7 @@ uint32_t triple_black_corner_started_ms = 0; // 0 = not currently pending
 
 constexpr float TRIPLE_BLACK_SPEED_SCALE = 0.35f;
 constexpr int MIN_TRIPLE_MOVING_PWM = 40;
+constexpr float WHITE_GAP_SPEED_SCALE = 0.70f; //######################################################################################################################
 // Fraction of each calibrated black range required to count as “detected.”
 // Deliberately lenient - this only needs to catch a thin printed line,
 // including its fainter edges, for ordinary line following.
@@ -54,6 +55,9 @@ constexpr float DEEP_BLACK_LEVEL = 0.60f;
 
 int last_heading_left_speed = 10;
 int last_heading_right_speed = 100;
+int white_gap_left_speed = 110;
+int white_gap_right_speed = 100;
+bool white_gap_active = false;
 
 constexpr float KP = 65.0f;
 constexpr float KD = 7.0f;
@@ -383,6 +387,11 @@ int determine_drive_mode()
 
   previous_black_sensor_count = black_sensor_count;
 
+  if (!all_very_white)
+  {
+    white_gap_active = false;
+  }
+
   // Triple black: preserve the previous PD heading, but travel slowly
   // until the robot leaves this wide black region.
   if (triple_black_active)
@@ -452,8 +461,18 @@ int determine_drive_mode()
     return 2;
   }
 
-  // Genuinely white on all sensors: just drive straight forward.
-  drive_motors(straight_speed, straight_speed);
+  // Capture the last heading once on entry to a genuinely white gap. Replaying
+  // the same scaled pair preserves the curve without reducing it every loop.
+  if (!white_gap_active)
+  {
+    // white_gap_left_speed = last_left_speed;
+    // white_gap_right_speed = last_right_speed;
+    white_gap_active = true;
+  }
+
+  drive_motors(
+      static_cast<int>(white_gap_left_speed * WHITE_GAP_SPEED_SCALE),
+      static_cast<int>(white_gap_right_speed * WHITE_GAP_SPEED_SCALE));
   return 0;
 }
 
