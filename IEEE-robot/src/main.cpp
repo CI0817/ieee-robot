@@ -17,6 +17,28 @@ constexpr uint32_t LINE_REACQUIRE_TIMEOUT_MS = 2000;
 uint32_t last_genuine_line_ms = 0;
 bool ignoring_lone_outer_hit = false;
 
+// A lone outer sensor also reads this way, briefly, while crossing the wide
+// perpendicular crossbar of a T (or +) intersection the robot should just
+// drive straight through - a real 90-degree corner holds the same one-sided
+// reading continuously because the robot is physically sitting at it, while
+// crossing a crossbar only produces it for a fleeting instant. Require it to
+// hold for a short confirm window before actually committing to the pivot,
+// so a T-crossing transient doesn't get mistaken for a corner.
+constexpr uint32_t PIVOT_CONFIRM_MS = 60;
+uint32_t pivot_condition_started_ms = 0; // 0 = not currently pending
+
+// Same reasoning applies to the triple-black corner classifier below: a T
+// (or +) intersection's crossbar makes all three sensors go briefly black
+// together, often passing through a count of 2 right beforehand purely from
+// sensor-to-sensor timing skew - identical to the signature this code uses
+// to detect a genuine corner. A real corner holds that state for a while
+// since the robot is physically turning through it; a crossbar clears in a
+// handful of loop iterations. Defer committing to the amplified turn until
+// the corner condition has held for a short window, so a T-crossing clears
+// (and this never fires) before it would otherwise turn.
+constexpr uint32_t TRIPLE_BLACK_CORNER_CONFIRM_MS = 80;
+uint32_t triple_black_corner_started_ms = 0; // 0 = not currently pending
+
 int last_left_speed = 0;
 int last_right_speed = 0;
 int previous_black_sensor_count = 0;
@@ -332,6 +354,7 @@ int determine_drive_mode()
   else if (black_sensor_count != 3)
   {
     triple_black_active = false;
+    triple_black_corner_started_ms = 0;
   }
 
   previous_black_sensor_count = black_sensor_count;
@@ -349,6 +372,20 @@ int determine_drive_mode()
     // obstacle: continue straight rather than initiating a corner turn.
     if (!triple_black_is_corner)
     {
+      triple_black_corner_started_ms = 0;
+      drive_motors(straight_speed, straight_speed);
+      return 7;
+    }
+
+    if (triple_black_corner_started_ms == 0)
+    {
+      triple_black_corner_started_ms = millis();
+    }
+
+    if (millis() - triple_black_corner_started_ms < TRIPLE_BLACK_CORNER_CONFIRM_MS)
+    {
+      // Not yet confirmed as a genuine corner (vs. a brief T/+ crossbar
+      // crossing) - keep driving straight for now.
       drive_motors(straight_speed, straight_speed);
       return 7;
     }
@@ -486,17 +523,32 @@ void pid_drive()
     ignoring_lone_outer_hit = false;
   }
 
-  // Preserve pivoting only for an obvious sharp corner.
-  if (lone_left_hit)
+  // Preserve pivoting only for an obvious sharp corner - require the
+  // one-sided reading to hold for PIVOT_CONFIRM_MS first so a momentary
+  // crossing of a T/+ intersection's crossbar doesn't trigger a spin.
+  if (lone_left_hit || lone_right_hit)
   {
-    drive_motors(-turning_speed / 2, turning_speed / 2);
-    return;
-  }
+    if (pivot_condition_started_ms == 0)
+    {
+      pivot_condition_started_ms = now_ms;
+    }
 
-  if (lone_right_hit)
+    if (now_ms - pivot_condition_started_ms >= PIVOT_CONFIRM_MS)
+    {
+      if (lone_left_hit)
+      {
+        drive_motors(-turning_speed / 2, turning_speed / 2);
+      }
+      else
+      {
+        drive_motors(turning_speed / 2, -turning_speed / 2);
+      }
+      return;
+    }
+  }
+  else
   {
-    drive_motors(turning_speed / 2, -turning_speed / 2);
-    return;
+    pivot_condition_started_ms = 0;
   }
 
   // Use the outer sensors for steering. The middle sensor confirms the line
