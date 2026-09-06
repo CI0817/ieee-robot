@@ -2,8 +2,8 @@
 #include <BallRetrieve.h>
 
 // Pivot only when one side sees a very strong line and the other is mostly clear.
-constexpr float PIVOT_BLACK_LEVEL = 0.90f;
-constexpr float PIVOT_OTHER_SIDE_MAX = 0.10f;
+constexpr float PIVOT_BLACK_LEVEL = 0.80f;
+constexpr float PIVOT_OTHER_SIDE_MAX = 0.30f;
 constexpr float TRIPLE_TURN_SCALE = 3.0f;
 
 int last_left_speed = 0;
@@ -36,7 +36,7 @@ bool white_gap_active = false;
 
 constexpr float KP = 65.0f;
 constexpr float KD = 7.0f;
-constexpr float MAX_CORRECTION = 60.0f;
+constexpr float MAX_CORRECTION = 70.0f;
 constexpr float CENTER_DEADBAND = 0.03f;
 constexpr float MIDDLE_CENTER_LEVEL = 0.20f;
 constexpr float OUTER_CENTER_MAX = 0.08f;
@@ -48,11 +48,11 @@ constexpr float OUTER_CENTER_MAX = 0.08f;
 
 constexpr int LEFT_BLACK_THRESHOLD = 20;
 constexpr int MIDDLE_BLACK_THRESHOLD = 15;
-constexpr int RIGHT_BLACK_THRESHOLD = 15;
+constexpr int RIGHT_BLACK_THRESHOLD = 10;
 
 constexpr int LEFT_BLACK_MAX = 550;
 constexpr int MIDDLE_BLACK_MAX = 110;
-constexpr int RIGHT_BLACK_MAX = 220;
+constexpr int RIGHT_BLACK_MAX = 180;
 constexpr int MAX_PWM = 250;
 // constexpr int MAX_DRIVE_PWM = 160; // Increase gradually after tuning
 constexpr int DEADBAND = 0;
