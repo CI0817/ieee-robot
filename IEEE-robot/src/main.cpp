@@ -444,14 +444,14 @@ void pid_drive()
   if (left_black >= PIVOT_BLACK_LEVEL &&
       right_black <= PIVOT_OTHER_SIDE_MAX)
   {
-    drive_motors(-turning_speed / 2, turning_speed / 2);
+    drive_motors(-turning_speed / 2, turning_speed / 3);
     return;
   }
 
   if (right_black >= PIVOT_BLACK_LEVEL &&
       left_black <= PIVOT_OTHER_SIDE_MAX)
   {
-    drive_motors(turning_speed / 2, -turning_speed / 2);
+    drive_motors(turning_speed / 3, -turning_speed / 2);
     return;
   }
 
