@@ -58,10 +58,13 @@ const int straight_speed = 150;
 // motor/driver asymmetry between forward and reverse - one wheel weaker in
 // the specific direction a given turn needs it to spin - can be tuned out
 // independently, rather than assuming both directions need the same PWM.
-// Start with both equal to turning_speed/2 and raise whichever side is
-// underperforming (right turns weaker than left has been observed).
-int LEFT_PIVOT_SPEED = turning_speed / 2;
-int RIGHT_PIVOT_SPEED = turning_speed / 2;
+// Deliberately NOT tied to turning_speed/2: a pivot rotates in place, and
+// speeding it up when straight_speed/turning_speed rose (150, was 100) left
+// less time to catch the moment to stop turning, overshooting corners. Kept
+// at the pre-speed-up value (100/2) here specifically; raise whichever side
+// is underperforming (right turns weaker than left has been observed).
+int LEFT_PIVOT_SPEED = 50;
+int RIGHT_PIVOT_SPEED = 50;
 // Used only by the blind timed drives (exiting the end zone, driving into
 // the start box before stopping) - kept separate from straight_speed so
 // speeding up normal line-following doesn't also change the distance those
