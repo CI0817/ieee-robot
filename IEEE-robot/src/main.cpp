@@ -54,6 +54,14 @@ constexpr uint8_t RIGHT_PWM_CHANNEL = 1;
 
 const int turning_speed = 150;
 const int straight_speed = 150;
+// Separate per-direction pivot speeds (each wheel gets +/- this value) so a
+// motor/driver asymmetry between forward and reverse - one wheel weaker in
+// the specific direction a given turn needs it to spin - can be tuned out
+// independently, rather than assuming both directions need the same PWM.
+// Start with both equal to turning_speed/2 and raise whichever side is
+// underperforming (right turns weaker than left has been observed).
+int LEFT_PIVOT_SPEED = turning_speed / 2;
+int RIGHT_PIVOT_SPEED = turning_speed / 2;
 // Used only by the blind timed drives (exiting the end zone, driving into
 // the start box before stopping) - kept separate from straight_speed so
 // speeding up normal line-following doesn't also change the distance those
@@ -367,18 +375,38 @@ void pid_drive()
       0.0f,
       1.0f);
 
+  {
+    static uint32_t last_pivot_debug_ms = 0;
+    constexpr uint32_t PIVOT_DEBUG_INTERVAL_MS = 250;
+    const uint32_t now_ms = millis();
+
+    if (now_ms - last_pivot_debug_ms >= PIVOT_DEBUG_INTERVAL_MS)
+    {
+      last_pivot_debug_ms = now_ms;
+      Serial.print("[Pivot] leftBlack=");
+      Serial.print(left_black, 2);
+      Serial.print(" rightBlack=");
+      Serial.print(right_black, 2);
+      Serial.print(" (need >=");
+      Serial.print(PIVOT_BLACK_LEVEL, 2);
+      Serial.print(" one side, <=");
+      Serial.print(PIVOT_OTHER_SIDE_MAX, 2);
+      Serial.println(" other)");
+    }
+  }
+
   // Preserve pivoting only for an obvious sharp corner.
   if (left_black >= PIVOT_BLACK_LEVEL &&
       right_black <= PIVOT_OTHER_SIDE_MAX)
   {
-    drive_motors(-turning_speed / 2, turning_speed / 2);
+    drive_motors(-LEFT_PIVOT_SPEED, LEFT_PIVOT_SPEED);
     return;
   }
 
   if (right_black >= PIVOT_BLACK_LEVEL &&
       left_black <= PIVOT_OTHER_SIDE_MAX)
   {
-    drive_motors(turning_speed / 2, -turning_speed / 2);
+    drive_motors(RIGHT_PIVOT_SPEED, -RIGHT_PIVOT_SPEED);
     return;
   }
 
