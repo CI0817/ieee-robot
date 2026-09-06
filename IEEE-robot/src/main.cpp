@@ -23,6 +23,21 @@ int previous_black_sensor_count = 0;
 bool triple_black_active = false;
 bool triple_black_is_corner = false;
 
+// Default triple black to "just keep driving forward" and only turn when
+// there's strong, sustained evidence of a genuine corner - a T/+
+// intersection's crossbar, or plain sensor-timing noise, can make the
+// sensor count pass through 2 right before hitting 3 for just an instant,
+// which used to be enough on its own to trigger a full corner turn. Require
+// two things first: the count actually sat at 2 for a real stretch (not a
+// single noisy loop sample) before reaching 3, AND the resulting
+// all-three-black state itself holds for a further stretch once reached. A
+// quick crossbar crossing at cruising speed can't satisfy either; a genuine
+// corner, which the robot physically sits at while turning, easily does.
+constexpr uint32_t TWO_BLACK_SUSTAINED_MS = 100;
+constexpr uint32_t TRIPLE_BLACK_CORNER_CONFIRM_MS = 100;
+uint32_t two_black_started_ms = 0;          // 0 = not currently at count == 2
+uint32_t triple_black_corner_started_ms = 0; // 0 = not currently pending
+
 constexpr float TRIPLE_BLACK_SPEED_SCALE = 0.35f;
 constexpr int MIN_TRIPLE_MOVING_PWM = 40;
 constexpr float WHITE_GAP_SPEED_SCALE = 0.70f; //######################################################################################################################
@@ -339,14 +354,35 @@ int determine_drive_mode()
       static_cast<int>(middle_black) +
       static_cast<int>(right_black);
 
+  // Capture whether the just-ending count == 2 state (if any) was actually
+  // held for a real stretch, before this loop's tracking update below
+  // resets/restarts the timer for the new count.
+  const bool two_black_was_sustained =
+      two_black_started_ms != 0 &&
+      (millis() - two_black_started_ms) >= TWO_BLACK_SUSTAINED_MS;
+
+  if (black_sensor_count == 2)
+  {
+    if (two_black_started_ms == 0)
+    {
+      two_black_started_ms = millis();
+    }
+  }
+  else
+  {
+    two_black_started_ms = 0;
+  }
+
   if (black_sensor_count == 3 && previous_black_sensor_count != 3)
   {
     triple_black_active = true;
-    triple_black_is_corner = (previous_black_sensor_count == 2);
+    triple_black_is_corner =
+        previous_black_sensor_count == 2 && two_black_was_sustained;
   }
   else if (black_sensor_count != 3)
   {
     triple_black_active = false;
+    triple_black_corner_started_ms = 0;
   }
 
   previous_black_sensor_count = black_sensor_count;
@@ -364,6 +400,20 @@ int determine_drive_mode()
     // obstacle: continue straight rather than initiating a corner turn.
     if (!triple_black_is_corner)
     {
+      triple_black_corner_started_ms = 0;
+      drive_motors(straight_speed, straight_speed);
+      return 7;
+    }
+
+    if (triple_black_corner_started_ms == 0)
+    {
+      triple_black_corner_started_ms = millis();
+    }
+
+    if (millis() - triple_black_corner_started_ms < TRIPLE_BLACK_CORNER_CONFIRM_MS)
+    {
+      // Not yet absolutely sure this is a genuine corner - keep driving
+      // straight rather than committing to a turn.
       drive_motors(straight_speed, straight_speed);
       return 7;
     }
