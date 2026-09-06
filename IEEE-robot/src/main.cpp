@@ -93,6 +93,18 @@ void setup()
   ledcAttachPin(left_pwm, LEFT_PWM_CHANNEL);
   ledcAttachPin(right_pwm, RIGHT_PWM_CHANNEL);
   // Serial.begin(9600);
+
+  // Drive out of start zone.
+  // While two or more sensors are on black, drive straight slowly.
+  while (static_cast<int>(check_black(left_ir)) +
+            static_cast<int>(check_black(middle_ir)) +
+            static_cast<int>(check_black(right_ir)) >=
+        2)
+  {
+    drive_motors(straight_speed / 2, straight_speed / 2);
+  }
+
+  stop();
 }
 
 void loop()
