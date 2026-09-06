@@ -122,7 +122,7 @@ uint32_t last_start_box_black_ms = 0;
 // than guess from sensor geometry, just keep driving straight for a fixed,
 // hand-tuned duration before stopping for good. Tune this on the assembled
 // robot against the actual box size.
-constexpr uint32_t DRIVE_INTO_START_BOX_MS = 2900;
+constexpr uint32_t DRIVE_INTO_START_BOX_MS = 2700;
 bool driving_into_start_box = false;
 uint32_t driving_into_start_box_started_ms = 0;
 bool finished = false; // Latched once stopped in the start box; attempt over.
@@ -146,6 +146,13 @@ bool has_seen_white_gap = false;
 // itself.
 bool exiting_end_zone = false;
 bool exit_cleared_black_zone = false;
+
+// Drive straight out of the start box for a fixed initial period before
+// handing off to normal line following - avoids reacting to whatever the
+// sensors see while still settling/leaving the box at the very start of a
+// run, before there's a line to actually follow yet.
+constexpr uint32_t INITIAL_STRAIGHT_DRIVE_MS = 1000;
+uint32_t start_ms = 0;
 
 int determine_drive_mode();
 void pid_drive();
@@ -180,6 +187,8 @@ void setup()
   ledcSetup(RIGHT_PWM_CHANNEL, PWM_FREQUENCY, PWM_RESOLUTION);
   ledcAttachPin(left_pwm, LEFT_PWM_CHANNEL);
   ledcAttachPin(right_pwm, RIGHT_PWM_CHANNEL);
+
+  start_ms = millis();
 }
 
 void loop()
@@ -187,6 +196,12 @@ void loop()
   if (finished)
   {
     // Attempt is over - stay stopped forever.
+    return;
+  }
+
+  if (millis() - start_ms < INITIAL_STRAIGHT_DRIVE_MS)
+  {
+    drive_motors(straight_speed, straight_speed);
     return;
   }
 
