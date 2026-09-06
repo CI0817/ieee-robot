@@ -4,10 +4,16 @@
 // Pivot only when one side sees a very strong line and the other is mostly clear.
 constexpr float PIVOT_BLACK_LEVEL = 0.90f;
 constexpr float PIVOT_OTHER_SIDE_MAX = 0.10f;
+constexpr float TRIPLE_TURN_SCALE = 3.0f;
 
 int last_left_speed = 0;
 int last_right_speed = 0;
+int previous_black_sensor_count = 0;
+bool triple_black_active = false;
+bool triple_black_is_corner = false;
 
+constexpr float TRIPLE_BLACK_SPEED_SCALE = 0.35f;
+constexpr int MIN_TRIPLE_MOVING_PWM = 40;
 constexpr float WHITE_GAP_SPEED_SCALE = 0.40f;
 constexpr int WHITE_GAP_MAX_READING = 35;
 // Fraction of each calibrated black range required to count as “detected.”
@@ -22,6 +28,8 @@ constexpr float DETECT_BLACK_LEVEL = 0.15f;
 // track.
 constexpr float DEEP_BLACK_LEVEL = 0.60f;
 
+int last_heading_left_speed = 100;
+int last_heading_right_speed = 100;
 int white_gap_left_speed = 0;
 int white_gap_right_speed = 0;
 bool white_gap_active = false;
@@ -136,6 +144,7 @@ void drive_motors(int left_vel, int right_vel);
 bool check_black(int sensor_pin);
 int black_threshold_for_level(int sensor_pin, float level);
 int black_threshold_for(int sensor_pin);
+int apply_minimum_triple_pwm(int velocity);
 void end_zone();
 void stop();
 bool update_end_zone_detector(bool all_deep_black);
@@ -300,13 +309,69 @@ int determine_drive_mode()
     return 9;
   }
 
+  const int black_sensor_count =
+      static_cast<int>(left_black) +
+      static_cast<int>(middle_black) +
+      static_cast<int>(right_black);
+
+  if (black_sensor_count == 3 && previous_black_sensor_count != 3)
+  {
+    triple_black_active = true;
+    triple_black_is_corner = (previous_black_sensor_count == 2);
+  }
+  else if (black_sensor_count != 3)
+  {
+    triple_black_active = false;
+  }
+
+  previous_black_sensor_count = black_sensor_count;
+
   if (!all_very_white)
   {
     white_gap_active = false;
   }
 
-  // Any sensor on black (including all three at once, e.g. a wide corner or
-  // an intersection): normal PD steering handles it directly.
+  // Triple black: preserve the previous PD heading, but travel slowly
+  // until the robot leaves this wide black region.
+  if (triple_black_active)
+  {
+    // Entering triple black from zero or one black sensor is treated as an
+    // obstacle: continue straight rather than initiating a corner turn.
+    if (!triple_black_is_corner)
+    {
+      drive_motors(straight_speed, straight_speed);
+      return 7;
+    }
+
+    // Separate the previous heading into forward motion and turn amount.
+    const float heading_forward =
+        (last_heading_left_speed + last_heading_right_speed) / 2.0f;
+
+    const float heading_turn =
+        (last_heading_left_speed - last_heading_right_speed) / 2.0f;
+
+    // Slow forward travel, but preserve/amplify the steering difference.
+    const int slow_left_speed = constrain(
+        static_cast<int>(
+            (heading_forward * TRIPLE_BLACK_SPEED_SCALE) +
+            (heading_turn * TRIPLE_TURN_SCALE)),
+        -MAX_PWM,
+        MAX_PWM);
+
+    const int slow_right_speed = constrain(
+        static_cast<int>(
+            (heading_forward * TRIPLE_BLACK_SPEED_SCALE) -
+            (heading_turn * TRIPLE_TURN_SCALE)),
+        -MAX_PWM,
+        MAX_PWM);
+
+    drive_motors(
+        apply_minimum_triple_pwm(slow_left_speed),
+        apply_minimum_triple_pwm(slow_right_speed));
+    return 6;
+  }
+
+  // One or two sensors on black: return to normal PD steering.
   if (left_black || middle_black || right_black)
   {
     pid_drive();
@@ -441,6 +506,10 @@ void pid_drive()
       -MAX_PWM,
       MAX_PWM);
 
+  // Save the normal PD heading before issuing the motor command.
+  last_heading_left_speed = left_speed;
+  last_heading_right_speed = right_speed;
+
   drive_motors(left_speed, right_speed);
 }
 
@@ -537,6 +606,21 @@ int black_threshold_for_level(int sensor_pin, float level)
 int black_threshold_for(int sensor_pin)
 {
   return black_threshold_for_level(sensor_pin, DETECT_BLACK_LEVEL);
+}
+
+int apply_minimum_triple_pwm(int velocity)
+{
+  if (velocity > 0 && velocity < MIN_TRIPLE_MOVING_PWM)
+  {
+    return MIN_TRIPLE_MOVING_PWM;
+  }
+
+  if (velocity < 0 && velocity > -MIN_TRIPLE_MOVING_PWM)
+  {
+    return -MIN_TRIPLE_MOVING_PWM;
+  }
+
+  return velocity;
 }
 
 void end_zone()
